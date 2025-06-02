@@ -9,6 +9,7 @@ import plotly.express as px
 from pymongo import MongoClient
 
 # === CONFIG ===
+st.set_page_config(page_title="Pomodoro Tracker", layout="centered")  # Must be first Streamlit command
 POMODORO_MIN = 25
 BREAK_MIN = 5
 IST = pytz.timezone('Asia/Kolkata')
@@ -72,7 +73,6 @@ with st.sidebar:
         st.info("No notes in this range.")
 
 # === UI ===
-st.set_page_config(page_title="Pomodoro Tracker", layout="centered")
 st.title("⏱️ Time Tracker (IST)")
 st.markdown("Track focused work with custom categories, alerts, and visual summaries.")
 
