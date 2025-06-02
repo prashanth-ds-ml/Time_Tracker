@@ -2,3 +2,4 @@ streamlit
 pygame
 plotly
 plotly-express
+pymongo
