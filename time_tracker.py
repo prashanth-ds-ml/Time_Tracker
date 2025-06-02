@@ -74,7 +74,7 @@ def add_note(content, date, category="", task=""):
         "_id": note_id,
         "type": "Note",
         "date": date,
-        "Notes": content,
+        "content": content,
         "category": category,
         "task": task,
         "created_at": datetime.utcnow()
@@ -99,7 +99,7 @@ if page == "Notes Viewer":
         for note in notes:
             st.markdown(f"**{note['date']}**")
             st.markdown(f"*{note['category']} - {note['task']}*")
-            st.markdown(note['Notes'])
+            st.markdown(note['content'])
             st.markdown("---")
     else:
         st.info("No notes in this range.")
