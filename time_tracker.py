@@ -142,8 +142,8 @@ if mongo_logs:
     today = datetime.now(IST).date()
 
     df_today = df[df["date"].dt.date == today]
-    work_today = df_today[df_today["session_type"] == "Work"]
-    break_today = df_today[df_today["session_type"] == "Break"]
+    work_today = df_today[df_today["type"] == "Work"]
+    break_today = df_today[df_today["type"] == "Break"]
 
     col1, col2, col3 = st.columns(3)
     col1.metric("💼 Work Today", f"{work_today['duration'].sum()} min")
