@@ -125,11 +125,34 @@ if st.session_state.start_time:
         st.session_state.start_time = None
         st.session_state.is_break = False
 
+# === NOTES SECTION ===
+st.markdown("---")
+st.header("📝 Add Daily Notes")
+
+with st.form("notes_form"):
+    note_date = st.date_input("Note Date", value=datetime.now(IST).date())
+    note_category = st.selectbox("Category", st.session_state.custom_categories)
+    note_task = st.text_input("Task or Sub-topic")
+    note_content = st.text_area("Write your notes")
+    submitted = st.form_submit_button("Save Note")
+
+    if submitted and note_content.strip():
+        note_doc = {
+            "type": "Note",
+            "date": note_date.isoformat(),
+            "category": note_category,
+            "task": note_task,
+            "title": f"Note for {note_task} on {note_date.strftime('%b %d')}",
+            "content": note_content,
+            "created_at": datetime.utcnow()
+        }
+        collection.insert_one(note_doc)
+        st.success("✅ Note saved successfully!")
+
 # === ANALYTICS SECTION ===
 st.markdown("---")
 st.header("📊 Productivity Analytics")
 
-# === Load Pomodoro Logs from MongoDB ===
 records = list(collection.find({"type": "Pomodoro"}))
 if records:
     df = pd.DataFrame(records)
@@ -149,27 +172,11 @@ if records:
 
     st.subheader("📆 Daily Work Summary")
     df_work = df[df["pomodoro_type"] == "Work"]
-    
-    # Group by date and sum durations
     daily_sum = df_work.groupby(df_work["date"].dt.date)["duration"].sum().reset_index()
-    
-    # Ensure proper date order
     daily_sum = daily_sum.sort_values("date")
-    
-    # Format as 'Month Day Year' e.g., 'May 31 2025'
     daily_sum["date_str"] = daily_sum["date"].apply(lambda x: x.strftime("%b %d %Y"))
-    
-    # Plot
-    fig = px.bar(
-        daily_sum,
-        x="date_str",
-        y="duration",
-        title="Daily Work Duration",
-        labels={"duration": "Minutes", "date_str": "Date"}
-    )
+    fig = px.bar(daily_sum, x="date_str", y="duration", title="Daily Work Duration", labels={"duration": "Minutes", "date_str": "Date"})
     st.plotly_chart(fig, use_container_width=True)
-
-
 
     st.subheader("🧠 Time per Task in Each Category")
     cat_task = df_work.groupby(["category", "task"])["duration"].sum().sort_values(ascending=False)
