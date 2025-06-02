@@ -18,10 +18,12 @@ EXPECTED_COLS = ["Date", "Time", "Category", "Task", "Type", "Duration"]
 # === SOUND ALERT (via HTML) ===
 def sound_alert():
     st.components.v1.html(f"""
-        <audio autoplay>
-            <source src="{SOUND_PATH}" type="audio/mpeg">
-        </audio>
+        <script>
+            var audio = new Audio("/static/sanji.mp3");
+            audio.play();
+        </script>
     """, height=0)
+
 
 # === SESSION STATE INIT ===
 if "start_time" not in st.session_state:
