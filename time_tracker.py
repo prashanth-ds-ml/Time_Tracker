@@ -15,7 +15,7 @@ IST = pytz.timezone('Asia/Kolkata')
 MONGO_URI = st.secrets["mongo_uri"]
 DB_NAME = "time_tracker_db"
 COLLECTION_NAME = "logs"
-SOUND_PATH = "https://github.com/prashanth-ds-ml/Time_Tracker/raw/refs/heads/main/sanji.mp3"
+SOUND_PATH = "https://github.com/prashanth-ds-ml/Time_Tracker/raw/refs/heads/main/one_piece_overtake.mp3"
 
 # === SOUND ALERT with JS + HTML fallback ===
 def sound_alert():
