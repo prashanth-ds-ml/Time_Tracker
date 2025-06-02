@@ -15,14 +15,20 @@ SOUND_PATH = "sanji.mp3"  # Must be in the root of the repo
 IST = pytz.timezone('Asia/Kolkata')
 EXPECTED_COLS = ["Date", "Time", "Category", "Task", "Type", "Duration"]
 
-# === SOUND ALERT (reliable with slight delay after DOM is ready) ===
+# === SOUND ALERT with JS + HTML fallback ===
 def sound_alert():
     st.components.v1.html(f"""
+        <audio id="alertAudio" autoplay>
+            <source src="{SOUND_PATH}" type="audio/mpeg">
+            Your browser does not support the audio element.
+        </audio>
         <script>
-            setTimeout(() => {{
+            const playAudio = () => {{
                 const audio = new Audio('{SOUND_PATH}');
-                audio.play().catch(err => console.log('Autoplay blocked:', err));
-            }}, 1000);
+                audio.volume = 0.8;
+                audio.play().catch(err => console.log("Autoplay issue:", err));
+            }}
+            setTimeout(playAudio, 1000);
         </script>
     """, height=0)
 
