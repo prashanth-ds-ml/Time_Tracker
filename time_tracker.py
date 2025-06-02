@@ -139,6 +139,10 @@ elif page == "Notes Saver":
 
     st.stop()
 
+# === Continue with Pomodoro Tracker Main Page ===
+# (Your main Pomodoro timer logic starts here...)
+# You can paste your full Pomodoro Tracker logic after this block if needed.
+
 
 # === UI ===
 st.title("⏱️ Time Tracker (IST)")
