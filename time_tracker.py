@@ -1,37 +1,25 @@
 import streamlit as st
 import time
-import csv
-import os
+import hashlib
 from datetime import datetime, timedelta
 import pandas as pd
 import pytz
 import plotly.express as px
+from pymongo import MongoClient
 
 # === CONFIG ===
 POMODORO_MIN = 25
 BREAK_MIN = 5
-CSV_FILE = "pomodoro_log.csv"
 SOUND_PATH = "https://github.com/prashanth-ds-ml/Time_Tracker/raw/refs/heads/main/sanji.mp3"
 IST = pytz.timezone('Asia/Kolkata')
-EXPECTED_COLS = ["Date", "Time", "Category", "Task", "Type", "Duration"]
+DB_NAME = "time_tracker_db"
+COLLECTION_NAME = "logs"
 
-# === SOUND ALERT with JS + HTML fallback ===
-def sound_alert():
-    st.components.v1.html(f"""
-        <audio id="alertAudio" autoplay>
-            <source src="{SOUND_PATH}" type="audio/mpeg">
-            Your browser does not support the audio element.
-        </audio>
-        <script>
-            const playAudio = () => {{
-                const audio = new Audio('{SOUND_PATH}');
-                audio.volume = 0.8;
-                audio.play().catch(err => console.log("Autoplay issue:", err));
-            }}
-            setTimeout(playAudio, 1000);
-        </script>
-    """, height=0)
-
+# === MongoDB Connection ===
+MONGO_URI = st.secrets["mongo_uri"]
+client = MongoClient(MONGO_URI)
+db = client[DB_NAME]
+collection = db[COLLECTION_NAME]
 
 # === SESSION STATE INIT ===
 if "start_time" not in st.session_state:
@@ -86,7 +74,16 @@ with col2:
         st.session_state.is_break = True
         st.success("Break started!")
 
-# === Timer Logic ===
+# === SOUND ALERT ===
+def sound_alert():
+    st.components.v1.html(f"""
+        <audio id=\"alertAudio\" autoplay>
+            <source src=\"{SOUND_PATH}\" type=\"audio/mpeg\">
+            Your browser does not support the audio element.
+        </audio>
+    """, height=0)
+
+# === TIMER LOGIC ===
 if st.session_state.start_time:
     duration = BREAK_MIN * 60 if st.session_state.is_break else POMODORO_MIN * 60
     end_time = st.session_state.start_time + duration
@@ -100,25 +97,33 @@ if st.session_state.start_time:
         st.rerun()
     else:
         now_ist = datetime.now(IST)
-        log_entry = [
-            now_ist.strftime("%d-%m-%Y"),
-            now_ist.strftime("%I:%M %p"),
-            st.session_state.category if not st.session_state.is_break else "",
-            st.session_state.task if not st.session_state.is_break else "",
-            "Break" if st.session_state.is_break else "Work",
-            BREAK_MIN if st.session_state.is_break else POMODORO_MIN
-        ]
+        date_str = now_ist.strftime("%d-%m-%Y")
+        time_str = now_ist.strftime("%I:%M %p")
+        category = st.session_state.category if not st.session_state.is_break else ""
+        task = st.session_state.task if not st.session_state.is_break else ""
+        task_type = "Break" if st.session_state.is_break else "Work"
+        duration = BREAK_MIN if st.session_state.is_break else POMODORO_MIN
 
-        file_exists = os.path.exists(CSV_FILE)
-        with open(CSV_FILE, "a", newline="") as f:
-            writer = csv.writer(f)
-            if not file_exists:
-                writer.writerow(EXPECTED_COLS)
-            writer.writerow(log_entry)
+        def generate_log_id():
+            key = f"{date_str}_{time_str}_{category}_{task}_{task_type}"
+            return hashlib.sha256(key.encode()).hexdigest()
 
+        log_entry = {
+            "_id": generate_log_id(),
+            "type": "Pomodoro",
+            "date": datetime.strptime(date_str, "%d-%m-%Y").date().isoformat(),
+            "time": time_str,
+            "category": category,
+            "task": task,
+            "session_type": task_type,
+            "duration": duration,
+            "created_at": datetime.utcnow()
+        }
+
+        collection.update_one({"_id": log_entry["_id"]}, {"$set": log_entry}, upsert=True)
         sound_alert()
         st.balloons()
-        st.success(f"{'Break' if st.session_state.is_break else 'Pomodoro'} session completed!")
+        st.success(f"{task_type} session completed!")
 
         st.session_state.task = ""
         st.session_state.category = ""
@@ -129,79 +134,89 @@ if st.session_state.start_time:
 st.markdown("---")
 st.header("📊 Productivity Analytics")
 
-if os.path.exists(CSV_FILE):
-    try:
-        raw = []
-        with open(CSV_FILE, "r") as f:
-            reader = csv.reader(f)
-            header = next(reader)
-            for row in reader:
-                if len(row) == 6:
-                    raw.append(row)
-                elif len(row) == 4:
-                    date, time_str, task, task_type = row
-                    category = "" if task_type == "Break" else "Misc"
-                    duration = BREAK_MIN if task_type == "Break" else POMODORO_MIN
-                    raw.append([date, time_str, category, task, task_type, duration])
+mongo_logs = list(collection.find({"type": "Pomodoro"}))
+if mongo_logs:
+    df = pd.DataFrame(mongo_logs)
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["duration"] = pd.to_numeric(df["duration"], errors="coerce").fillna(0).astype(int)
+    today = datetime.now(IST).date()
 
-        df = pd.DataFrame(raw, columns=EXPECTED_COLS)
-        df["Date"] = pd.to_datetime(df["Date"], format="%d-%m-%Y", errors="coerce")
-        df.dropna(subset=["Date"], inplace=True)
-        df["Duration"] = pd.to_numeric(df["Duration"], errors="coerce").fillna(0).astype(int)
+    df_today = df[df["date"].dt.date == today]
+    work_today = df_today[df_today["session_type"] == "Work"]
+    break_today = df_today[df_today["session_type"] == "Break"]
 
-        today = datetime.now(IST).date()
-        df_today = df[df["Date"].dt.date == today]
-        work_today = df_today[df_today["Type"] == "Work"]
-        break_today = df_today[df_today["Type"] == "Break"]
+    col1, col2, col3 = st.columns(3)
+    col1.metric("💼 Work Today", f"{work_today['duration'].sum()} min")
+    col2.metric("☕ Break Today", f"{break_today['duration'].sum()} min")
+    col3.metric("🔁 Break Sessions", len(break_today))
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("💼 Work Today", f"{work_today['Duration'].sum()} min")
-        col2.metric("☕ Break Today", f"{break_today['Duration'].sum()} min")
-        col3.metric("🔁 Break Sessions", len(break_today))
+    st.subheader("📆 Daily Work Summary")
+    df_work = df[df["session_type"] == "Work"]
+    daily_sum = df_work.groupby(df["date"].dt.date)["duration"].sum().reset_index()
+    daily_sum['DateStr'] = daily_sum['date'].astype(str)
+    fig = px.bar(daily_sum, x='DateStr', y="duration", title="Daily Work Duration", labels={"duration": "Minutes", "date": "Date"})
+    st.plotly_chart(fig, use_container_width=True)
 
-        st.subheader("📆 Daily Work Summary")
-        df_work = df[df["Type"] == "Work"]
-        daily_sum = df_work.groupby(df["Date"].dt.date)["Duration"].sum().reset_index()
-        daily_sum['DateStr'] = daily_sum['Date'].astype(str)
-        fig = px.bar(daily_sum, x='DateStr', y="Duration", title="Daily Work Duration", labels={"Duration": "Minutes", "Date": "Date"})
-        st.plotly_chart(fig, use_container_width=True)
+    st.subheader("🧠 Time per Task in Each Category")
+    cat_task = df_work.groupby(["category", "task"])["duration"].sum().sort_values(ascending=False)
+    st.dataframe(cat_task.reset_index().rename(columns={"duration": "Minutes"}))
 
-        st.subheader("🧠 Time per Task in Each Category")
-        cat_task = df_work.groupby(["Category", "Task"])["Duration"].sum().sort_values(ascending=False)
-        st.dataframe(cat_task.reset_index().rename(columns={"Duration": "Minutes"}))
+    st.markdown("---")
+    st.header("🧮 Overall Summary")
+    total_min = df_work["duration"].sum()
+    st.write(f"**Total Work Time:** {total_min} min ({total_min//60} hr {total_min%60} min)")
 
-        st.markdown("---")
-        st.header("🧮 Overall Summary")
-        total_min = df_work["Duration"].sum()
-        st.write(f"**Total Work Time:** {total_min} min ({total_min//60} hr {total_min%60} min)")
+    df_cycles = df_work.groupby(df["date"].dt.date).size() // 4
+    if not df_cycles.empty:
+        best_day = df_cycles.idxmax()
+        st.write(f"**Most Productive Day:** {best_day} with {df_cycles.max()} Pomodoro cycle(s)")
 
-        df_cycles = df_work.groupby(df["Date"].dt.date).size() // 4
-        if not df_cycles.empty:
-            best_day = df_cycles.idxmax()
-            st.write(f"**Most Productive Day:** {best_day} with {df_cycles.max()} Pomodoro cycle(s)")
+    st.markdown("---")
+    st.header("🔥 Streak Tracker (4+ Pomodoros/day)")
 
-        st.markdown("---")
-        st.header("🔥 Streak Tracker (4+ Pomodoros/day)")
+    streak = 0
+    best_streak = 0
+    current = 0
+    for i in range(30):
+        check_date = today - timedelta(days=i)
+        if check_date in df_cycles.index and df_cycles[check_date] >= 1:
+            current += 1
+            best_streak = max(best_streak, current)
+            if i == 0:
+                streak = current
+        else:
+            if i == 0:
+                streak = 0
+            current = 0
 
-        streak = 0
-        best_streak = 0
-        current = 0
-        for i in range(30):
-            check_date = today - timedelta(days=i)
-            if check_date in df_cycles.index and df_cycles[check_date] >= 1:
-                current += 1
-                best_streak = max(best_streak, current)
-                if i == 0:
-                    streak = current
-            else:
-                if i == 0:
-                    streak = 0
-                current = 0
-
-        st.metric("🔥 Current Streak", f"{streak} day(s)")
-        st.metric("🏆 Best Streak", f"{best_streak} day(s)")
-
-    except Exception as e:
-        st.error(f"Error processing CSV: {e}")
+    st.metric("🔥 Current Streak", f"{streak} day(s)")
+    st.metric("🏆 Best Streak", f"{best_streak} day(s)")
 else:
-    st.info("No log file yet. Start a Pomodoro to begin tracking.")
+    st.info("No logs found in database. Start tracking to see analytics.")
+
+# === NOTES SECTION ===
+st.markdown("---")
+st.header("📝 Add Daily Note")
+
+with st.form("note_form"):
+    note_date = st.date_input("Date", value=datetime.now().date())
+    note_title = st.text_input("Title")
+    note_content = st.text_area("Note")
+    note_category = st.selectbox("Category", st.session_state.custom_categories)
+    note_task = st.text_input("Task")
+    submitted = st.form_submit_button("Save Note")
+
+    if submitted and note_title and note_content:
+        note_id = hashlib.sha256(f"{note_date}_{note_title}".encode()).hexdigest()
+        note_doc = {
+            "_id": note_id,
+            "type": "Note",
+            "date": note_date.isoformat(),
+            "title": note_title,
+            "content": note_content,
+            "category": note_category,
+            "task": note_task,
+            "created_at": datetime.utcnow()
+        }
+        collection.update_one({"_id": note_id}, {"$set": note_doc}, upsert=True)
+        st.success("Note saved!")
