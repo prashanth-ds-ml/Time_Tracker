@@ -107,23 +107,33 @@ if page == "Notes Viewer":
 
 elif page == "Notes Saver":
     st.title("📝 Save Daily Note")
+
+    # Define key for form-level state
     with st.form("add_note"):
         note_date = st.date_input("Date", datetime.now(IST))
         cat_options = st.session_state.custom_categories + ["➕ Add New Category"]
-        category_selection = st.selectbox("Category", cat_options)
+        category_selection = st.selectbox("Category", cat_options, key="note_category_select")
+
+        new_cat_input = ""
         if category_selection == "➕ Add New Category":
-            new_cat = st.text_input("Enter New Category")
-            if new_cat:
-                if new_cat not in st.session_state.custom_categories:
-                    st.session_state.custom_categories.append(new_cat)
-                note_category = new_cat
-        else:
-            note_category = category_selection
+            new_cat_input = st.text_input("Enter New Category", key="new_cat_input")
+        
         note_task = st.text_input("Task")
         note_content = st.text_area("Note Content")
         submitted = st.form_submit_button("💾 Save Note")
-        if submitted:
-            add_note(note_content, note_date.isoformat(), note_category, note_task)
+
+    # Handle post-form logic
+    if submitted:
+        # Add new category if chosen
+        if category_selection == "➕ Add New Category" and new_cat_input:
+            if new_cat_input not in st.session_state.custom_categories:
+                st.session_state.custom_categories.append(new_cat_input)
+            note_category = new_cat_input
+        else:
+            note_category = category_selection
+
+        add_note(note_content, note_date.isoformat(), note_category, note_task)
+
     st.stop()
 
 # === UI ===
