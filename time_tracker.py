@@ -51,6 +51,26 @@ client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 collection = db[COLLECTION_NAME]
 
+# === SIDEBAR ===
+st.sidebar.header("🗂️ Notes Viewer")
+with st.sidebar:
+    note_start = st.date_input("From", datetime.now(IST) - timedelta(days=7))
+    note_end = st.date_input("To", datetime.now(IST))
+    notes_query = {
+        "type": "Note",
+        "date": {"$gte": note_start.isoformat(), "$lte": note_end.isoformat()}
+    }
+    notes = list(collection.find(notes_query))
+    if notes:
+        st.subheader("📝 Notes")
+        for note in notes:
+            st.markdown(f"**{note['date']} → {note['title']}**")
+            st.markdown(f"*{note['category']} - {note['task']}*")
+            st.markdown(note['content'])
+            st.markdown("---")
+    else:
+        st.info("No notes in this range.")
+
 # === UI ===
 st.set_page_config(page_title="Pomodoro Tracker", layout="centered")
 st.title("⏱️ Time Tracker (IST)")
@@ -125,34 +145,34 @@ if st.session_state.start_time:
         st.session_state.start_time = None
         st.session_state.is_break = False
 
-# === NOTES SECTION ===
+# === ADD NOTE ===
 st.markdown("---")
-st.header("📝 Add Daily Notes")
-
-with st.form("notes_form"):
-    note_date = st.date_input("Note Date", value=datetime.now(IST).date())
+st.header("📝 Daily Notes")
+with st.form("add_note"):
+    note_date = st.date_input("Date", datetime.now(IST))
+    note_title = st.text_input("Title")
     note_category = st.selectbox("Category", st.session_state.custom_categories)
-    note_task = st.text_input("Task or Sub-topic")
-    note_content = st.text_area("Write your notes")
-    submitted = st.form_submit_button("Save Note")
-
-    if submitted and note_content.strip():
+    note_task = st.text_input("Task")
+    note_content = st.text_area("Content")
+    submitted = st.form_submit_button("💾 Save Note")
+    if submitted:
         note_doc = {
             "type": "Note",
             "date": note_date.isoformat(),
+            "title": note_title,
             "category": note_category,
             "task": note_task,
-            "title": f"Note for {note_task} on {note_date.strftime('%b %d')}",
             "content": note_content,
             "created_at": datetime.utcnow()
         }
         collection.insert_one(note_doc)
-        st.success("✅ Note saved successfully!")
+        st.success("Note saved successfully!")
 
 # === ANALYTICS SECTION ===
 st.markdown("---")
 st.header("📊 Productivity Analytics")
 
+# === Load Pomodoro Logs from MongoDB ===
 records = list(collection.find({"type": "Pomodoro"}))
 if records:
     df = pd.DataFrame(records)
@@ -172,10 +192,20 @@ if records:
 
     st.subheader("📆 Daily Work Summary")
     df_work = df[df["pomodoro_type"] == "Work"]
+
+    # Group by date and sum durations
     daily_sum = df_work.groupby(df_work["date"].dt.date)["duration"].sum().reset_index()
     daily_sum = daily_sum.sort_values("date")
     daily_sum["date_str"] = daily_sum["date"].apply(lambda x: x.strftime("%b %d %Y"))
-    fig = px.bar(daily_sum, x="date_str", y="duration", title="Daily Work Duration", labels={"duration": "Minutes", "date_str": "Date"})
+
+    # Plot
+    fig = px.bar(
+        daily_sum,
+        x="date_str",
+        y="duration",
+        title="Daily Work Duration",
+        labels={"duration": "Minutes", "date_str": "Date"}
+    )
     st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("🧠 Time per Task in Each Category")
