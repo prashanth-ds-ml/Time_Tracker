@@ -68,15 +68,13 @@ db = client[DB_NAME]
 collection = db[COLLECTION_NAME]
 
 # === FUNCTIONS ===
-def add_note(content, date, category="", task=""):
-    note_id = hashlib.sha256(f"{date}_{category}_{task}".encode("utf-8")).hexdigest()
+def add_note(content, date):
+    note_id = hashlib.sha256(f"{date}_{content}".encode("utf-8")).hexdigest()
     note_doc = {
         "_id": note_id,
         "type": "Note",
         "date": date,
         "content": content,
-        "category": category,
-        "task": task,
         "created_at": datetime.utcnow()
     }
     collection.update_one({"_id": note_id}, {"$set": note_doc}, upsert=True)
@@ -98,7 +96,6 @@ if page == "Notes Viewer":
     if notes:
         for note in notes:
             st.markdown(f"**{note['date']}**")
-            st.markdown(f"*{note['category']} - {note['task']}*")
             st.markdown(note['content'])
             st.markdown("---")
     else:
@@ -110,39 +107,16 @@ elif page == "Notes Saver":
 
     with st.form("add_note_form"):
         note_date = st.date_input("Date", datetime.now(IST))
-
-        cat_options = st.session_state.custom_categories + ["➕ Add New Category"]
-        category_selection = st.selectbox("Select Category", cat_options, key="note_cat_select")
-
-        if category_selection == "➕ Add New Category":
-            new_cat = st.text_input("Enter New Category", key="note_new_cat_input")
-            if new_cat:
-                if new_cat not in st.session_state.custom_categories:
-                    st.session_state.custom_categories.append(new_cat)
-                note_category = new_cat
-            else:
-                note_category = ""
-        else:
-            note_category = category_selection
-
-        note_task = st.text_input("Task")
         note_content = st.text_area("Note Content")
         submitted = st.form_submit_button("💾 Save Note")
 
     if submitted:
-        if not note_category:
-            st.warning("Please enter or select a valid category.")
-        elif not note_content.strip():
+        if not note_content.strip():
             st.warning("Note content cannot be empty.")
         else:
-            add_note(note_content.strip(), note_date.isoformat(), note_category, note_task.strip())
+            add_note(note_content.strip(), note_date.isoformat())
 
     st.stop()
-
-# === Continue with Pomodoro Tracker Main Page ===
-# (Your main Pomodoro timer logic starts here...)
-# You can paste your full Pomodoro Tracker logic after this block if needed.
-
 
 # === UI ===
 st.title("⏱️ Time Tracker (IST)")
