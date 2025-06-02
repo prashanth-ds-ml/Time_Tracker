@@ -111,20 +111,17 @@ elif page == "Notes Saver":
     with st.form("add_note"):
         note_date = st.date_input("Date", datetime.now(IST))
 
-        # Category selection
         cat_options = st.session_state.custom_categories + ["➕ Add New Category"]
-        category_selection = st.selectbox("Category", cat_options)
-
+        category_selection = st.selectbox("Select Category", cat_options)
+        
         if category_selection == "➕ Add New Category":
             new_cat = st.text_input("Enter New Category")
             if new_cat:
                 if new_cat not in st.session_state.custom_categories:
                     st.session_state.custom_categories.append(new_cat)
-                note_category = new_cat
-            else:
-                note_category = ""
+                st.session_state.category = new_cat
         else:
-            note_category = category_selection
+            st.session_state.category = category_selection
 
         note_task = st.text_input("Task")
         note_content = st.text_area("Note Content")
