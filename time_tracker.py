@@ -92,7 +92,7 @@ if page == "Notes Viewer":
     st.stop()
 
 elif page == "Notes Saver":
-    st.title("📝 Daily Notes")
+    st.title("📝 Save Daily Note")
     with st.form("add_note"):
         note_date = st.date_input("Date", datetime.now(IST))
         note_category = st.selectbox("Category", st.session_state.custom_categories)
