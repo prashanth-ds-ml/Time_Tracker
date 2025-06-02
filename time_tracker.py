@@ -108,31 +108,36 @@ if page == "Notes Viewer":
 elif page == "Notes Saver":
     st.title("📝 Save Daily Note")
 
-    # Display form
     with st.form("add_note"):
         note_date = st.date_input("Date", datetime.now(IST))
-        cat_options = st.session_state.custom_categories + ["➕ Add New Category"]
-        category_selection = st.selectbox("Category", cat_options, key="note_category_select")
 
-        new_cat_input = ""
+        # Category selection
+        cat_options = st.session_state.custom_categories + ["➕ Add New Category"]
+        category_selection = st.selectbox("Category", cat_options)
+
         if category_selection == "➕ Add New Category":
-            new_cat_input = st.text_input("Enter New Category", key="new_cat_input")
+            new_cat = st.text_input("Enter New Category")
+            if new_cat:
+                if new_cat not in st.session_state.custom_categories:
+                    st.session_state.custom_categories.append(new_cat)
+                note_category = new_cat
+            else:
+                note_category = ""
+        else:
+            note_category = category_selection
 
         note_task = st.text_input("Task")
         note_content = st.text_area("Note Content")
         submitted = st.form_submit_button("💾 Save Note")
 
-    # After form submitted
     if submitted:
-        # Add category if new
-        if category_selection == "➕ Add New Category" and new_cat_input:
-            if new_cat_input not in st.session_state.custom_categories:
-                st.session_state.custom_categories.append(new_cat_input)
-            note_category = new_cat_input
+        if not note_category:
+            st.warning("Please enter or select a valid category.")
+        elif not note_content.strip():
+            st.warning("Note content cannot be empty.")
         else:
-            note_category = category_selection
+            add_note(note_content.strip(), note_date.isoformat(), note_category, note_task.strip())
 
-        add_note(note_content, note_date.isoformat(), note_category, note_task)
 
 
     st.stop()
