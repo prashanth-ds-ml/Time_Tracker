@@ -36,7 +36,7 @@ if "custom_categories" not in st.session_state:
 
 # === UI ===
 st.set_page_config(page_title="Pomodoro Tracker", layout="centered")
-st.title("⏱️ Dynamic Pomodoro Tracker (IST)")
+st.title("⏱️ Time Tracker (IST)")
 st.markdown("Track focused work with custom categories, alerts, and visual summaries.")
 
 st.markdown("---")
