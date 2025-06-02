@@ -10,7 +10,7 @@ import pytz
 POMODORO_MIN = 25
 BREAK_MIN = 5
 CSV_FILE = "pomodoro_log.csv"
-SOUND_PATH = "mixkit-cartoon-toy-whistle-616.mp3"  # Must be placed in the same directory or served statically
+SOUND_PATH = "sanji.mp3"  # Must be placed in the same directory or served statically
 IST = pytz.timezone('Asia/Kolkata')
 EXPECTED_COLS = ["Date", "Time", "Category", "Task", "Type", "Duration"]
 
