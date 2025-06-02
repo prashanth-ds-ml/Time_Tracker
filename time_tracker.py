@@ -11,7 +11,7 @@ import plotly.express as px
 POMODORO_MIN = 25
 BREAK_MIN = 5
 CSV_FILE = "pomodoro_log.csv"
-SOUND_PATH = "sanji.mp3"  # Must be in the root of the repo
+SOUND_PATH = "https://github.com/prashanth-ds-ml/Time_Tracker/raw/refs/heads/main/sanji.mp3"
 IST = pytz.timezone('Asia/Kolkata')
 EXPECTED_COLS = ["Date", "Time", "Category", "Task", "Type", "Duration"]
 
@@ -31,6 +31,7 @@ def sound_alert():
             setTimeout(playAudio, 1000);
         </script>
     """, height=0)
+
 
 # === SESSION STATE INIT ===
 if "start_time" not in st.session_state:
