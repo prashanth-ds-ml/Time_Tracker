@@ -52,9 +52,12 @@ client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 collection = db[COLLECTION_NAME]
 
-# === SIDEBAR ===
-st.sidebar.header("🗂️ Notes Viewer")
-with st.sidebar:
+# === SIDEBAR NAVIGATION ===
+st.sidebar.title("📁 Pages")
+page = st.sidebar.radio("Go to", ["Pomodoro Tracker", "Notes Viewer"])
+
+if page == "Notes Viewer":
+    st.title("🗂️ Notes Viewer")
     note_start = st.date_input("From", datetime.now(IST) - timedelta(days=7))
     note_end = st.date_input("To", datetime.now(IST))
     notes_query = {
@@ -63,7 +66,6 @@ with st.sidebar:
     }
     notes = list(collection.find(notes_query))
     if notes:
-        st.subheader("📝 Notes")
         for note in notes:
             st.markdown(f"**{note['date']} → {note['title']}**")
             st.markdown(f"*{note['category']} - {note['task']}*")
@@ -71,6 +73,7 @@ with st.sidebar:
             st.markdown("---")
     else:
         st.info("No notes in this range.")
+    st.stop()
 
 # === UI ===
 st.title("⏱️ Time Tracker (IST)")
@@ -172,7 +175,6 @@ with st.form("add_note"):
 st.markdown("---")
 st.header("📊 Productivity Analytics")
 
-# === Load Pomodoro Logs from MongoDB ===
 records = list(collection.find({"type": "Pomodoro"}))
 if records:
     df = pd.DataFrame(records)
@@ -193,12 +195,10 @@ if records:
     st.subheader("📆 Daily Work Summary")
     df_work = df[df["pomodoro_type"] == "Work"]
 
-    # Group by date and sum durations
     daily_sum = df_work.groupby(df_work["date"].dt.date)["duration"].sum().reset_index()
     daily_sum = daily_sum.sort_values("date")
     daily_sum["date_str"] = daily_sum["date"].apply(lambda x: x.strftime("%b %d %Y"))
 
-    # Plot
     fig = px.bar(
         daily_sum,
         x="date_str",
