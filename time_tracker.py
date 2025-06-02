@@ -150,8 +150,8 @@ if records:
     st.subheader("📆 Daily Work Summary")
     df_work = df[df["pomodoro_type"] == "Work"]
     daily_sum = df_work.groupby(df["date"].dt.date)["duration"].sum().reset_index()
-    daily_sum['date'] = daily_sum['date'].astype(str)
-    fig = px.bar(daily_sum, x='date', y="duration", title="Daily Work Duration", labels={"duration": "Minutes", "date": "Date"})
+    daily_sum["date"] = daily_sum["date"].astype(str)
+    fig = px.bar(daily_sum, x="date", y="duration", title="Daily Work Duration", labels={"duration": "Minutes", "date": "Date"})
     st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("🧠 Time per Task in Each Category")
