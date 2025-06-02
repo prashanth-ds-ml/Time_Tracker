@@ -111,12 +111,11 @@ elif page == "Notes Saver":
     with st.form("add_note_form"):
         note_date = st.date_input("Date", datetime.now(IST))
 
-        # Use the same mechanism as Pomodoro section
         cat_options = st.session_state.custom_categories + ["➕ Add New Category"]
-        category_selection = st.selectbox("Select Category", cat_options, key="notes_category_select")
+        category_selection = st.selectbox("Select Category", cat_options, key="note_cat_select")
 
         if category_selection == "➕ Add New Category":
-            new_cat = st.text_input("Enter New Category", key="notes_new_cat_input")
+            new_cat = st.text_input("Enter New Category", key="note_new_cat_input")
             if new_cat:
                 if new_cat not in st.session_state.custom_categories:
                     st.session_state.custom_categories.append(new_cat)
@@ -132,16 +131,14 @@ elif page == "Notes Saver":
 
     if submitted:
         if not note_category:
-            st.warning("Please select or enter a category.")
+            st.warning("Please enter or select a valid category.")
         elif not note_content.strip():
             st.warning("Note content cannot be empty.")
         else:
             add_note(note_content.strip(), note_date.isoformat(), note_category, note_task.strip())
 
-
-
-
     st.stop()
+
 
 # === UI ===
 st.title("⏱️ Time Tracker (IST)")
