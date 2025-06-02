@@ -1,6 +1,7 @@
 import streamlit as st
 import time
-import hashlib
+import csv
+import os
 from datetime import datetime, timedelta
 import pandas as pd
 import pytz
@@ -10,16 +11,28 @@ from pymongo import MongoClient
 # === CONFIG ===
 POMODORO_MIN = 25
 BREAK_MIN = 5
-SOUND_PATH = "https://github.com/prashanth-ds-ml/Time_Tracker/raw/refs/heads/main/sanji.mp3"
 IST = pytz.timezone('Asia/Kolkata')
+MONGO_URI = st.secrets["mongo_uri"]
 DB_NAME = "time_tracker_db"
 COLLECTION_NAME = "logs"
+SOUND_PATH = "https://github.com/prashanth-ds-ml/Time_Tracker/raw/refs/heads/main/sanji.mp3"
 
-# === MongoDB Connection ===
-MONGO_URI = st.secrets["mongo_uri"]
-client = MongoClient(MONGO_URI)
-db = client[DB_NAME]
-collection = db[COLLECTION_NAME]
+# === SOUND ALERT with JS + HTML fallback ===
+def sound_alert():
+    st.components.v1.html(f"""
+        <audio id="alertAudio" autoplay>
+            <source src="{SOUND_PATH}" type="audio/mpeg">
+            Your browser does not support the audio element.
+        </audio>
+        <script>
+            const playAudio = () => {{
+                const audio = new Audio('{SOUND_PATH}');
+                audio.volume = 0.8;
+                audio.play().catch(err => console.log("Autoplay issue:", err));
+            }}
+            setTimeout(playAudio, 1000);
+        </script>
+    """, height=0)
 
 # === SESSION STATE INIT ===
 if "start_time" not in st.session_state:
@@ -32,6 +45,11 @@ if "task" not in st.session_state:
     st.session_state.task = ""
 if "custom_categories" not in st.session_state:
     st.session_state.custom_categories = ["Learning", "Startup"]
+
+# === MongoDB Connection ===
+client = MongoClient(MONGO_URI)
+db = client[DB_NAME]
+collection = db[COLLECTION_NAME]
 
 # === UI ===
 st.set_page_config(page_title="Pomodoro Tracker", layout="centered")
@@ -74,16 +92,7 @@ with col2:
         st.session_state.is_break = True
         st.success("Break started!")
 
-# === SOUND ALERT ===
-def sound_alert():
-    st.components.v1.html(f"""
-        <audio id=\"alertAudio\" autoplay>
-            <source src=\"{SOUND_PATH}\" type=\"audio/mpeg\">
-            Your browser does not support the audio element.
-        </audio>
-    """, height=0)
-
-# === TIMER LOGIC ===
+# === Timer Logic ===
 if st.session_state.start_time:
     duration = BREAK_MIN * 60 if st.session_state.is_break else POMODORO_MIN * 60
     end_time = st.session_state.start_time + duration
@@ -97,34 +106,20 @@ if st.session_state.start_time:
         st.rerun()
     else:
         now_ist = datetime.now(IST)
-        date_str = now_ist.strftime("%d-%m-%Y")
-        time_str = now_ist.strftime("%I:%M %p")
-        category = st.session_state.category if not st.session_state.is_break else ""
-        task = st.session_state.task if not st.session_state.is_break else ""
-        task_type = "Break" if st.session_state.is_break else "Work"
-        duration = BREAK_MIN if st.session_state.is_break else POMODORO_MIN
-
-        def generate_log_id():
-            key = f"{date_str}_{time_str}_{category}_{task}_{task_type}"
-            return hashlib.sha256(key.encode()).hexdigest()
-
-        log_entry = {
-            "_id": generate_log_id(),
+        doc = {
             "type": "Pomodoro",
-            "date": datetime.strptime(date_str, "%d-%m-%Y").date().isoformat(),
-            "time": time_str,
-            "category": category,
-            "task": task,
-            "session_type": task_type,
-            "duration": duration,
+            "date": now_ist.date().isoformat(),
+            "time": now_ist.strftime("%I:%M %p"),
+            "category": st.session_state.category if not st.session_state.is_break else "",
+            "task": st.session_state.task if not st.session_state.is_break else "",
+            "pomodoro_type": "Break" if st.session_state.is_break else "Work",
+            "duration": BREAK_MIN if st.session_state.is_break else POMODORO_MIN,
             "created_at": datetime.utcnow()
         }
-
-        collection.update_one({"_id": log_entry["_id"]}, {"$set": log_entry}, upsert=True)
+        collection.insert_one(doc)
         sound_alert()
         st.balloons()
-        st.success(f"{task_type} session completed!")
-
+        st.success(f"{'Break' if st.session_state.is_break else 'Pomodoro'} session completed!")
         st.session_state.task = ""
         st.session_state.category = ""
         st.session_state.start_time = None
@@ -134,16 +129,18 @@ if st.session_state.start_time:
 st.markdown("---")
 st.header("📊 Productivity Analytics")
 
-mongo_logs = list(collection.find({"type": "Pomodoro"}))
-if mongo_logs:
-    df = pd.DataFrame(mongo_logs)
+# === Load Pomodoro Logs from MongoDB ===
+records = list(collection.find({"type": "Pomodoro"}))
+if records:
+    df = pd.DataFrame(records)
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df.dropna(subset=["date"], inplace=True)
     df["duration"] = pd.to_numeric(df["duration"], errors="coerce").fillna(0).astype(int)
-    today = datetime.now(IST).date()
 
+    today = datetime.now(IST).date()
     df_today = df[df["date"].dt.date == today]
-    work_today = df_today[df_today["type"] == "Work"]
-    break_today = df_today[df_today["type"] == "Break"]
+    work_today = df_today[df_today["pomodoro_type"] == "Work"]
+    break_today = df_today[df_today["pomodoro_type"] == "Break"]
 
     col1, col2, col3 = st.columns(3)
     col1.metric("💼 Work Today", f"{work_today['duration'].sum()} min")
@@ -151,7 +148,7 @@ if mongo_logs:
     col3.metric("🔁 Break Sessions", len(break_today))
 
     st.subheader("📆 Daily Work Summary")
-    df_work = df[df["session_type"] == "Work"]
+    df_work = df[df["pomodoro_type"] == "Work"]
     daily_sum = df_work.groupby(df["date"].dt.date)["duration"].sum().reset_index()
     daily_sum['DateStr'] = daily_sum['date'].astype(str)
     fig = px.bar(daily_sum, x='DateStr', y="duration", title="Daily Work Duration", labels={"duration": "Minutes", "date": "Date"})
@@ -192,31 +189,4 @@ if mongo_logs:
     st.metric("🔥 Current Streak", f"{streak} day(s)")
     st.metric("🏆 Best Streak", f"{best_streak} day(s)")
 else:
-    st.info("No logs found in database. Start tracking to see analytics.")
-
-# === NOTES SECTION ===
-st.markdown("---")
-st.header("📝 Add Daily Note")
-
-with st.form("note_form"):
-    note_date = st.date_input("Date", value=datetime.now().date())
-    note_title = st.text_input("Title")
-    note_content = st.text_area("Note")
-    note_category = st.selectbox("Category", st.session_state.custom_categories)
-    note_task = st.text_input("Task")
-    submitted = st.form_submit_button("Save Note")
-
-    if submitted and note_title and note_content:
-        note_id = hashlib.sha256(f"{note_date}_{note_title}".encode()).hexdigest()
-        note_doc = {
-            "_id": note_id,
-            "type": "Note",
-            "date": note_date.isoformat(),
-            "title": note_title,
-            "content": note_content,
-            "category": note_category,
-            "task": note_task,
-            "created_at": datetime.utcnow()
-        }
-        collection.update_one({"_id": note_id}, {"$set": note_doc}, upsert=True)
-        st.success("Note saved!")
+    st.info("No log records found in MongoDB.")
