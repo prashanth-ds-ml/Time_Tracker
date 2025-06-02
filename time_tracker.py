@@ -150,16 +150,25 @@ if records:
     st.subheader("📆 Daily Work Summary")
     df_work = df[df["pomodoro_type"] == "Work"]
     
-    # Step 1: Aggregate by actual date (no formatting yet)
+    # Group by date and sum durations
     daily_sum = df_work.groupby(df_work["date"].dt.date)["duration"].sum().reset_index()
     
-    # Step 2: Convert date to string *after sorting*
+    # Ensure proper date order
     daily_sum = daily_sum.sort_values("date")
-    daily_sum["date_str"] = daily_sum["date"].astype(str)
     
-    # Step 3: Plot with date_str to remove 00:00 display
-    fig = px.bar(daily_sum, x="date_str", y="duration", title="Daily Work Duration", labels={"duration": "Minutes", "date_str": "Date"})
+    # Format as 'Month Day Year' e.g., 'May 31 2025'
+    daily_sum["date_str"] = daily_sum["date"].apply(lambda x: x.strftime("%b %d %Y"))
+    
+    # Plot
+    fig = px.bar(
+        daily_sum,
+        x="date_str",
+        y="duration",
+        title="Daily Work Duration",
+        labels={"duration": "Minutes", "date_str": "Date"}
+    )
     st.plotly_chart(fig, use_container_width=True)
+
 
 
     st.subheader("🧠 Time per Task in Each Category")
