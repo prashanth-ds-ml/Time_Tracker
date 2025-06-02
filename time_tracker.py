@@ -18,7 +18,7 @@ MONGO_URI = st.secrets["mongo_uri"]
 DB_NAME = "time_tracker_db"
 COLLECTION_NAME = "logs"
 SOUND_PATH = "https://github.com/prashanth-ds-ml/Time_Tracker/raw/refs/heads/main/one_piece_overtake.mp3"
-BACKGROUND_IMAGE = "https://github.com/prashanth-ds-ml/Time_Tracker/blob/main/zoro.jpg?raw=true"
+BACKGROUND_IMAGE = "https://i.pinimg.com/736x/ef/d4/04/efd404ef0270e3ab0561177425626d4c.jpg"
 
 # === CUSTOM CSS FOR BACKGROUND ===
 st.markdown(f"""
