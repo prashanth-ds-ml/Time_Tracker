@@ -11,19 +11,20 @@ import plotly.express as px
 POMODORO_MIN = 25
 BREAK_MIN = 5
 CSV_FILE = "pomodoro_log.csv"
-SOUND_PATH = "sanji.mp3"  # Must be placed in the same directory or served statically
+SOUND_PATH = "sanji.mp3"  # Must be in the root of the repo
 IST = pytz.timezone('Asia/Kolkata')
 EXPECTED_COLS = ["Date", "Time", "Category", "Task", "Type", "Duration"]
 
-# === SOUND ALERT (via HTML) ===
+# === SOUND ALERT (reliable with slight delay after DOM is ready) ===
 def sound_alert():
     st.components.v1.html(f"""
         <script>
-            var audio = new Audio("/static/sanji.mp3");
-            audio.play();
+            setTimeout(() => {{
+                const audio = new Audio('{SOUND_PATH}');
+                audio.play().catch(err => console.log('Autoplay blocked:', err));
+            }}, 1000);
         </script>
     """, height=0)
-
 
 # === SESSION STATE INIT ===
 if "start_time" not in st.session_state:
