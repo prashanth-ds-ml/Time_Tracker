@@ -152,7 +152,7 @@ if os.path.exists(CSV_FILE):
         st.subheader("📆 Daily Work Summary")
         df_work = df[df["Type"] == "Work"]
         daily_sum = df_work.groupby(df["Date"].dt.date)["Duration"].sum().reset_index()
-        fig = px.bar(daily_sum, x="Date", y="Duration", title="Daily Work Duration", labels={"Duration": "Minutes"})
+        fig = px.bar(daily_sum, x=daily_sum['Date'].dt.strftime('%d-%b-%Y'), y="Duration", title="Daily Work Duration", labels={"Duration": "Minutes", "Date": "Date"})
         st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("🧠 Time per Task in Each Category")
