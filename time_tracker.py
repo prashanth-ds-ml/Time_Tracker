@@ -108,20 +108,23 @@ if page == "Notes Viewer":
 elif page == "Notes Saver":
     st.title("📝 Save Daily Note")
 
-    with st.form("add_note"):
+    with st.form("add_note_form"):
         note_date = st.date_input("Date", datetime.now(IST))
 
+        # Use the same mechanism as Pomodoro section
         cat_options = st.session_state.custom_categories + ["➕ Add New Category"]
-        category_selection = st.selectbox("Select Category", cat_options)
-        
+        category_selection = st.selectbox("Select Category", cat_options, key="notes_category_select")
+
         if category_selection == "➕ Add New Category":
-            new_cat = st.text_input("Enter New Category")
+            new_cat = st.text_input("Enter New Category", key="notes_new_cat_input")
             if new_cat:
                 if new_cat not in st.session_state.custom_categories:
                     st.session_state.custom_categories.append(new_cat)
-                st.session_state.category = new_cat
+                note_category = new_cat
+            else:
+                note_category = ""
         else:
-            st.session_state.category = category_selection
+            note_category = category_selection
 
         note_task = st.text_input("Task")
         note_content = st.text_area("Note Content")
@@ -129,11 +132,12 @@ elif page == "Notes Saver":
 
     if submitted:
         if not note_category:
-            st.warning("Please enter or select a valid category.")
+            st.warning("Please select or enter a category.")
         elif not note_content.strip():
             st.warning("Note content cannot be empty.")
         else:
             add_note(note_content.strip(), note_date.isoformat(), note_category, note_task.strip())
+
 
 
 
