@@ -60,7 +60,7 @@ def add_note(content, date, category="", task=""):
         "_id": note_id,
         "type": "Note",
         "date": date,
-        "Notes": content,
+        "content": content,
         "category": category,
         "task": task,
         "created_at": datetime.utcnow()
