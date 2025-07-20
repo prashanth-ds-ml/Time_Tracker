@@ -10,9 +10,23 @@ from pymongo import MongoClient
 import hashlib
 import importlib.util
 
-
 # === CONFIG ===
 st.set_page_config(page_title="Pomodoro Tracker", layout="centered")  # Must be first Streamlit command
+POMODORO_MIN = 25
+BREAK_MIN = 5
+IST = pytz.timezone('Asia/Kolkata')
+MONGO_URI = st.secrets["mongo_uri"]
+DB_NAME = "time_tracker_db"
+COLLECTION_NAME = "logs"
+SOUND_PATH = "https://github.com/prashanth-ds-ml/Time_Tracker/raw/refs/heads/main/one_piece_overtake.mp3"
+BACKGROUND_IMAGE = "https://i.pinimg.com/736x/ef/d4/04/efd404ef0270e3ab0561177425626d4c.jpg"
+
+# === MongoDB Connection (must be before duplicate user check) ===
+client = MongoClient(MONGO_URI)
+db = client[DB_NAME]
+collection = db[COLLECTION_NAME]
+users_collection = db["users"]
+
 # === REMOVE DUPLICATE USERS ON LAUNCH ===
 def run_remove_duplicate_users_if_needed():
     # Check for duplicate 'prashanth' users
@@ -25,14 +39,6 @@ def run_remove_duplicate_users_if_needed():
         mod.remove_duplicate_prashanth()
 
 run_remove_duplicate_users_if_needed()
-POMODORO_MIN = 25
-BREAK_MIN = 5
-IST = pytz.timezone('Asia/Kolkata')
-MONGO_URI = st.secrets["mongo_uri"]
-DB_NAME = "time_tracker_db"
-COLLECTION_NAME = "logs"
-SOUND_PATH = "https://github.com/prashanth-ds-ml/Time_Tracker/raw/refs/heads/main/one_piece_overtake.mp3"
-BACKGROUND_IMAGE = "https://i.pinimg.com/736x/ef/d4/04/efd404ef0270e3ab0561177425626d4c.jpg"
 
 # === CUSTOM CSS FOR BACKGROUND ===
 st.markdown(f"""
