@@ -301,14 +301,4 @@ if records:
     st.metric("🏆 Best Streak", f"{best_streak} day(s)")
 else:
     st.info("No log records found in MongoDB.")
-                streak = current
-        else:
-            if i == 0:
-                streak = 0
-            current = 0
-
-    st.metric("🔥 Current Streak", f"{streak} day(s)")
-    st.metric("🏆 Best Streak", f"{best_streak} day(s)")
-else:
-    st.info("No log records found in MongoDB.")
 
