@@ -64,13 +64,6 @@ def add_user(username):
     if not users_collection.find_one({"username": username}):
         users_collection.insert_one({"username": username, "created_at": datetime.utcnow()})
 
-def migrate_existing_data_to_prashanth():
-    # Attach all existing Pomodoro and Note docs without 'user' field to user 'prashanth'
-    for doc in collection.find({"user": {"$exists": False}}):
-        collection.update_one({"_id": doc["_id"]}, {"$set": {"user": "prashanth"}})
-    # Ensure 'prashanth' user exists
-    add_user("prashanth")
-
 # === SESSION STATE INIT ===
 if "start_time" not in st.session_state:
     st.session_state.start_time = None
@@ -84,9 +77,6 @@ if "custom_categories" not in st.session_state:
     st.session_state.custom_categories = ["Learning", "Startup"]
 if "user" not in st.session_state:
     st.session_state.user = None
-
-# === MIGRATE EXISTING DATA ON FIRST RUN ===
-migrate_existing_data_to_prashanth()
 
 # === SIDEBAR USER SELECTION ===
 st.sidebar.title("👤 User Management")
@@ -301,6 +291,16 @@ if records:
             current += 1
             best_streak = max(best_streak, current)
             if i == 0:
+                streak = current
+        else:
+            if i == 0:
+                streak = 0
+            current = 0
+
+    st.metric("🔥 Current Streak", f"{streak} day(s)")
+    st.metric("🏆 Best Streak", f"{best_streak} day(s)")
+else:
+    st.info("No log records found in MongoDB.")
                 streak = current
         else:
             if i == 0:
