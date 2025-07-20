@@ -50,6 +50,27 @@ def sound_alert():
         </script>
     """, height=0)
 
+# === MongoDB Connection ===
+client = MongoClient(MONGO_URI)
+db = client[DB_NAME]
+collection = db[COLLECTION_NAME]
+users_collection = db["users"]
+
+# === USER MANAGEMENT ===
+def get_all_users():
+    return [u["username"] for u in users_collection.find({}, {"_id": 0, "username": 1})]
+
+def add_user(username):
+    if not users_collection.find_one({"username": username}):
+        users_collection.insert_one({"username": username, "created_at": datetime.utcnow()})
+
+def migrate_existing_data_to_prashanth():
+    # Attach all existing Pomodoro and Note docs without 'user' field to user 'prashanth'
+    for doc in collection.find({"user": {"$exists": False}}):
+        collection.update_one({"_id": doc["_id"]}, {"$set": {"user": "prashanth"}})
+    # Ensure 'prashanth' user exists
+    add_user("prashanth")
+
 # === SESSION STATE INIT ===
 if "start_time" not in st.session_state:
     st.session_state.start_time = None
@@ -61,20 +82,41 @@ if "task" not in st.session_state:
     st.session_state.task = ""
 if "custom_categories" not in st.session_state:
     st.session_state.custom_categories = ["Learning", "Startup"]
+if "user" not in st.session_state:
+    st.session_state.user = None
 
-# === MongoDB Connection ===
-client = MongoClient(MONGO_URI)
-db = client[DB_NAME]
-collection = db[COLLECTION_NAME]
+# === MIGRATE EXISTING DATA ON FIRST RUN ===
+migrate_existing_data_to_prashanth()
+
+# === SIDEBAR USER SELECTION ===
+st.sidebar.title("👤 User Management")
+users = get_all_users()
+if not users:
+    add_user("prashanth")
+    users = ["prashanth"]
+
+user_select = st.sidebar.selectbox("Select User", users, index=users.index(st.session_state.user) if st.session_state.user in users else 0)
+st.session_state.user = user_select
+
+with st.sidebar.expander("➕ Add New User"):
+    new_user = st.text_input("New Username", key="new_user_input")
+    if st.button("Add User"):
+        if new_user and new_user not in users:
+            add_user(new_user)
+            st.session_state.user = new_user
+            st.experimental_rerun()
+        elif new_user in users:
+            st.warning("User already exists.")
 
 # === FUNCTIONS ===
 def add_note(content, date):
-    note_id = hashlib.sha256(f"{date}_{content}".encode("utf-8")).hexdigest()
+    note_id = hashlib.sha256(f"{date}_{content}_{st.session_state.user}".encode("utf-8")).hexdigest()
     note_doc = {
         "_id": note_id,
         "type": "Note",
         "date": date,
         "content": content,
+        "user": st.session_state.user,
         "created_at": datetime.utcnow()
     }
     collection.update_one({"_id": note_id}, {"$set": note_doc}, upsert=True)
@@ -90,6 +132,7 @@ if page == "Notes Viewer":
     note_end = st.date_input("To", datetime.now(IST))
     notes_query = {
         "type": "Note",
+        "user": st.session_state.user,
         "date": {"$gte": note_start.isoformat(), "$lte": note_end.isoformat()}
     }
     notes = list(collection.find(notes_query))
@@ -180,6 +223,7 @@ if st.session_state.start_time:
             "task": st.session_state.task if not st.session_state.is_break else "",
             "pomodoro_type": "Break" if st.session_state.is_break else "Work",
             "duration": BREAK_MIN if st.session_state.is_break else POMODORO_MIN,
+            "user": st.session_state.user,
             "created_at": datetime.utcnow()
         }
         collection.insert_one(doc)
@@ -196,7 +240,7 @@ st.markdown("---")
 st.header("📊 Productivity Analytics")
 
 # === Load Pomodoro Logs from MongoDB ===
-records = list(collection.find({"type": "Pomodoro"}))
+records = list(collection.find({"type": "Pomodoro", "user": st.session_state.user}))
 if records:
     df = pd.DataFrame(records)
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
