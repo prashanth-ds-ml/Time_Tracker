@@ -104,7 +104,7 @@ with st.sidebar.expander("➕ Add New User"):
         if new_user and new_user not in users:
             add_user(new_user)
             st.session_state.user = new_user
-            st.experimental_rerun()
+            st.rerun()
         elif new_user in users:
             st.warning("User already exists.")
 
