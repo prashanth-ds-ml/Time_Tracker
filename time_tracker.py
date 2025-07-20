@@ -8,9 +8,23 @@ import pytz
 import plotly.express as px
 from pymongo import MongoClient
 import hashlib
+import importlib.util
+
 
 # === CONFIG ===
 st.set_page_config(page_title="Pomodoro Tracker", layout="centered")  # Must be first Streamlit command
+# === REMOVE DUPLICATE USERS ON LAUNCH ===
+def run_remove_duplicate_users_if_needed():
+    # Check for duplicate 'prashanth' users
+    prashanth_users = list(users_collection.find({"username": "prashanth"}))
+    if len(prashanth_users) > 1:
+        # Dynamically import and run remove_duplicate_prashanth from remove_duplicate_users.py
+        spec = importlib.util.spec_from_file_location("remove_duplicate_users", "remove_duplicate_users.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.remove_duplicate_prashanth()
+
+run_remove_duplicate_users_if_needed()
 POMODORO_MIN = 25
 BREAK_MIN = 5
 IST = pytz.timezone('Asia/Kolkata')
