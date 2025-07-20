@@ -8,7 +8,6 @@ import pytz
 import plotly.express as px
 from pymongo import MongoClient
 import hashlib
-import importlib.util
 
 # === CONFIG ===
 st.set_page_config(page_title="Pomodoro Tracker", layout="centered")  # Must be first Streamlit command
@@ -21,24 +20,11 @@ COLLECTION_NAME = "logs"
 SOUND_PATH = "https://github.com/prashanth-ds-ml/Time_Tracker/raw/refs/heads/main/one_piece_overtake.mp3"
 BACKGROUND_IMAGE = "https://i.pinimg.com/736x/ef/d4/04/efd404ef0270e3ab0561177425626d4c.jpg"
 
-# === MongoDB Connection (must be before duplicate user check) ===
+# === MongoDB Connection ===
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 collection = db[COLLECTION_NAME]
 users_collection = db["users"]
-
-# === REMOVE DUPLICATE USERS ON LAUNCH ===
-def run_remove_duplicate_users_if_needed():
-    # Check for duplicate 'prashanth' users
-    prashanth_users = list(users_collection.find({"username": "prashanth"}))
-    if len(prashanth_users) > 1:
-        # Dynamically import and run remove_duplicate_prashanth from remove_duplicate_users.py
-        spec = importlib.util.spec_from_file_location("remove_duplicate_users", "remove_duplicate_users.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        mod.remove_duplicate_prashanth()
-
-run_remove_duplicate_users_if_needed()
 
 # === CUSTOM CSS FOR BACKGROUND ===
 st.markdown(f"""
