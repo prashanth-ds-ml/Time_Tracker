@@ -270,80 +270,159 @@ if records:
     work_today = df_today[df_today["pomodoro_type"] == "Work"]
     break_today = df_today[df_today["pomodoro_type"] == "Break"]
 
-    # === DAILY GOALS & PROGRESS ===
-    if "daily_goal" not in st.session_state:
-        st.session_state.daily_goal = 2  # Default 2 pomodoros (50 minutes)
+    # === PSYCHOLOGY-DRIVEN PROGRESSIVE GOALS ===
     
-    # Quick metrics row
-    col1, col2, col3, col4 = st.columns(4)
+    # Calculate user's journey days (total days with any activity)
+    active_days = len(df_work.groupby(df_work["date"].dt.date).size())
+    
+    # Progressive goal system based on habit formation science
+    def get_adaptive_goal(days_active):
+        if days_active <= 5:
+            return 1, "🌱 Building Habit", "Start small, be consistent"
+        elif days_active <= 12:
+            return 2, "🔥 Establishing Routine", "Building momentum"
+        elif days_active <= 19:
+            return 3, "💪 Strengthening Discipline", "Pushing boundaries"
+        else:
+            return 4, "🚀 Peak Performance", "Maintaining excellence"
+    
+    adaptive_goal, phase_name, phase_desc = get_adaptive_goal(active_days)
+    min_streak_goal = 2 if active_days > 12 else adaptive_goal  # Minimum for streak after day 12
+    
+    # === TOP SECTION: DAILY GOALS & PROGRESS ===
+    st.markdown("""
+    <div style='background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); 
+                padding: 20px; border-radius: 15px; margin-bottom: 20px;'>
+        <h2 style='color: white; text-align: center; margin: 0;'>🎯 Today's Mission</h2>
+    </div>
+    """, unsafe_allow_html=True)
+    
     today_progress = len(work_today)
     today_minutes = work_today['duration'].sum()
-    progress_pct = min(100, (today_progress / st.session_state.daily_goal) * 100)
+    progress_pct = min(100, (today_progress / adaptive_goal) * 100)
     
-    col1.metric("💼 Today's Work", f"{today_minutes} min")
-    col2.metric("🎯 Progress", f"{today_progress}/{st.session_state.daily_goal}")
-    col3.metric("☕ Breaks", f"{break_today['duration'].sum()} min")
-    col4.metric("📈 Goal %", f"{progress_pct:.0f}%")
-
-    # Progress bar with goal setting
-    goal_col1, goal_col2 = st.columns([1, 3])
-    with goal_col1:
-        new_goal = st.number_input("Daily Goal", min_value=1, max_value=20, value=st.session_state.daily_goal)
-        if new_goal != st.session_state.daily_goal:
-            st.session_state.daily_goal = new_goal
+    # Progress metrics in a clean layout
+    progress_col1, progress_col2, progress_col3 = st.columns([2, 1, 1])
     
-    with goal_col2:
-        st.progress(progress_pct / 100)
-        if today_progress >= st.session_state.daily_goal:
-            st.success("🎉 Daily goal achieved!")
-        elif today_progress >= st.session_state.daily_goal * 0.75:
-            st.info("💪 Almost there!")
+    with progress_col1:
+        st.markdown(f"""
+        <div style='background: white; padding: 15px; border-radius: 10px; text-align: center;'>
+            <h3 style='margin: 0; color: #333;'>{phase_name}</h3>
+            <p style='margin: 5px 0; color: #666;'>{phase_desc}</p>
+            <div style='background: #f0f0f0; border-radius: 20px; height: 30px; margin: 10px 0;'>
+                <div style='background: linear-gradient(90deg, #4CAF50, #45a049); 
+                           width: {progress_pct}%; height: 100%; border-radius: 20px; 
+                           display: flex; align-items: center; justify-content: center;'>
+                    <span style='color: white; font-weight: bold;'>{today_progress}/{adaptive_goal}</span>
+                </div>
+            </div>
+            <p style='margin: 0; font-size: 14px; color: #888;'>Day {active_days} of your journey</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with progress_col2:
+        st.metric("⏱️ Minutes", f"{today_minutes}")
+        st.metric("☕ Breaks", f"{break_today['duration'].sum()}")
+    
+    with progress_col3:
+        st.metric("📅 Active Days", f"{active_days}")
+        if today_progress >= adaptive_goal:
+            st.success("✨ Goal Achieved!")
+        elif today_progress >= adaptive_goal * 0.5:
+            st.info(f"🎯 {adaptive_goal - today_progress} to go!")
+        else:
+            st.warning("🚀 Let's start!")
 
     st.markdown("---")
     
-    # === CORE VISUALIZATIONS ===
+    # === CORE VISUALIZATIONS (4 KEY CHARTS) ===
     
-    # 1. DAILY OVERVIEW CHART
-    st.subheader("📊 Daily Work Overview (Last 30 Days)")
+    # 1. DAILY PERFORMANCE CHART
+    st.subheader("📈 Daily Performance Trends")
     
-    # Prepare daily data
+    # Prepare daily data with adaptive goals
     daily_work_counts = df_work.groupby(df_work["date"].dt.date).size()
     daily_minutes = df_work.groupby(df_work["date"].dt.date)["duration"].sum()
     
-    # Last 30 days data
+    # Last 30 days with adaptive goal tracking
     daily_overview = []
     for i in range(30):
         check_date = today - timedelta(days=29-i)
+        day_num = active_days - (29-i) if active_days > (29-i) else 1
+        day_goal, _, _ = get_adaptive_goal(day_num)
+        
         daily_count = daily_work_counts.get(check_date, 0)
         daily_min = daily_minutes.get(check_date, 0)
+        
         daily_overview.append({
             'date': check_date,
-            'date_str': check_date.strftime('%b %d'),
+            'date_str': check_date.strftime('%m/%d'),
             'pomodoros': daily_count,
             'minutes': daily_min,
-            'goal_met': daily_count >= st.session_state.daily_goal
+            'goal': day_goal * 25,
+            'achieved': daily_count >= day_goal,
+            'week': check_date.strftime('%U')
         })
     
     overview_df = pd.DataFrame(daily_overview)
     
-    # Create daily chart
+    # Clean daily performance chart
     daily_fig = px.bar(
         overview_df,
         x='date_str',
         y='minutes',
-        color='goal_met',
-        title="Daily Work Minutes vs Goal",
+        color='achieved',
+        title="📊 Daily Minutes vs Progressive Goals",
         labels={'minutes': 'Minutes Worked', 'date_str': 'Date'},
-        color_discrete_map={True: '#00FF00', False: '#FFA500'}
+        color_discrete_map={True: '#4CAF50', False: '#FF9800'},
+        height=400
     )
-    daily_fig.add_hline(y=st.session_state.daily_goal * 25, line_dash="dash", 
-                       line_color="red", annotation_text=f"Goal ({st.session_state.daily_goal * 25} min)")
+    
+    # Add goal line
+    daily_fig.add_scatter(
+        x=overview_df['date_str'],
+        y=overview_df['goal'],
+        mode='lines',
+        name='Adaptive Goal',
+        line=dict(color='red', dash='dash', width=2)
+    )
+    
+    daily_fig.update_layout(
+        showlegend=True,
+        xaxis_tickangle=-45,
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)'
+    )
     st.plotly_chart(daily_fig, use_container_width=True)
 
-    # 2. STREAK CALENDAR
-    st.subheader("🔥 Consistency Calendar & Streaks")
+    # 2. CATEGORY & TASK HEATMAP
+    st.subheader("🎯 Category & Task Focus Heatmap")
     
-    # Calculate streaks
+    if len(df_work) > 0:
+        # Create category-task matrix
+        task_category_matrix = df_work.groupby(['category', 'task'])['duration'].sum().reset_index()
+        task_category_pivot = task_category_matrix.pivot(index='category', columns='task', values='duration').fillna(0)
+        
+        if not task_category_pivot.empty:
+            heatmap_fig = px.imshow(
+                task_category_pivot.values,
+                labels=dict(x="Tasks", y="Categories", color="Minutes"),
+                x=task_category_pivot.columns,
+                y=task_category_pivot.index,
+                color_continuous_scale="Blues",
+                title="🎯 Time Investment Heatmap",
+                height=400
+            )
+            heatmap_fig.update_layout(
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)'
+            )
+            st.plotly_chart(heatmap_fig, use_container_width=True)
+    
+    # 3. STREAK TRACKING
+    st.subheader("🔥 Consistency Streak")
+    
+    # Calculate streaks with adaptive goals
     current_streak = 0
     max_streak = 0
     temp_streak = 0
@@ -351,8 +430,9 @@ if records:
     for i in range(365):
         check_date = today - timedelta(days=i)
         daily_count = daily_work_counts.get(check_date, 0)
+        day_goal = min_streak_goal  # Use minimum streak requirement
         
-        if daily_count >= st.session_state.daily_goal:
+        if daily_count >= day_goal:
             temp_streak += 1
             max_streak = max(max_streak, temp_streak)
             if i == 0:
@@ -362,174 +442,138 @@ if records:
                 current_streak = 0
             temp_streak = 0
     
-    # Streak metrics
+    # Streak metrics with psychology insights
     streak_col1, streak_col2, streak_col3 = st.columns(3)
-    streak_col1.metric("🔥 Current Streak", f"{current_streak} days")
-    streak_col2.metric("🏆 Best Streak", f"{max_streak} days")
-    if current_streak == 0:
-        streak_col3.metric("💡 Next Goal", "Start today!")
-    elif current_streak < 7:
-        streak_col3.metric("💪 To 1 Week", f"{7-current_streak} days")
-    else:
-        streak_col3.metric("🌟 Status", "On fire!")
     
-    # Calendar heatmap (last 6 weeks)
-    calendar_data = []
-    for i in range(42):
-        check_date = today - timedelta(days=41-i)
-        daily_count = daily_work_counts.get(check_date, 0)
-        daily_min = daily_minutes.get(check_date, 0)
-        
-        if daily_min >= st.session_state.daily_goal * 25:
-            intensity = 3
-        elif daily_min >= 25:
-            intensity = 2
-        elif daily_min > 0:
-            intensity = 1
+    with streak_col1:
+        st.metric("🔥 Current Streak", f"{current_streak} days")
+        if current_streak >= 21:
+            st.success("🎉 Habit Formed!")
+        elif current_streak >= 7:
+            st.info("💪 Building Strong!")
+        elif current_streak >= 3:
+            st.warning("🌱 Getting There!")
+    
+    with streak_col2:
+        st.metric("🏆 Best Streak", f"{max_streak} days")
+        if max_streak >= 30:
+            st.success("🏆 Champion!")
+        elif max_streak >= 14:
+            st.info("⭐ Strong!")
+    
+    with streak_col3:
+        next_milestone = 7 if current_streak < 7 else 21 if current_streak < 21 else 30
+        days_to_go = next_milestone - current_streak if current_streak < next_milestone else 0
+        if days_to_go > 0:
+            st.metric("🎯 Next Milestone", f"{days_to_go} days to {next_milestone}")
         else:
-            intensity = 0
-        
-        calendar_data.append({
-            'date': check_date,
-            'weekday': check_date.strftime('%a'),
-            'week': i // 7,
-            'pomodoros': daily_count,
-            'minutes': daily_min,
-            'intensity': intensity,
-            'is_today': check_date == today
-        })
+            st.metric("🌟 Status", "Peak Performer!")
     
-    calendar_df = pd.DataFrame(calendar_data)
+    # 4. WEEKLY PERFORMANCE PATTERN
+    st.subheader("📅 Weekly Performance Pattern")
     
-    # Create calendar heatmap
-    calendar_fig = px.scatter(
-        calendar_df,
-        x='weekday',
-        y='week',
-        size='minutes',
-        color='intensity',
-        hover_data=['date', 'pomodoros', 'minutes'],
-        title="6-Week Consistency Calendar",
-        color_continuous_scale=[[0, '#LIGHTGRAY'], [0.33, '#FFA500'], [0.66, '#FFFF00'], [1, '#00FF00']],
-        size_max=25
+    df_work_copy = df_work.copy()
+    df_work_copy['weekday'] = df_work_copy['date'].dt.day_name()
+    weekly_data = df_work_copy.groupby('weekday')['duration'].sum().reindex(
+        ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+    ).fillna(0).reset_index()
+    
+    week_fig = px.bar(
+        weekly_data, 
+        x='weekday', 
+        y='duration', 
+        title="📊 Weekly Focus Pattern",
+        color='duration',
+        color_continuous_scale='Viridis',
+        height=400
     )
+    week_fig.update_layout(
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        showlegend=False
+    )
+    st.plotly_chart(week_fig, use_container_width=True)
     
-    # Highlight today
-    today_data = calendar_df[calendar_df['is_today']]
-    if not today_data.empty:
-        calendar_fig.add_scatter(
-            x=today_data['weekday'],
-            y=today_data['week'],
-            mode='markers',
-            marker=dict(size=30, color='red', symbol='circle-open', line=dict(width=3)),
-            name='Today',
-            showlegend=False
-        )
+    st.markdown("---")
     
-    calendar_fig.update_layout(height=300, showlegend=False)
-    st.plotly_chart(calendar_fig, use_container_width=True)
-    
-    # 3. TIME DISTRIBUTION
-    st.subheader("🥧 Time Distribution")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        # Category distribution
-        category_time = df_work.groupby('category')['duration'].sum().reset_index()
-        if not category_time.empty:
-            cat_fig = px.pie(category_time, values='duration', names='category', title="Time by Category")
-            st.plotly_chart(cat_fig, use_container_width=True)
-    
-    with col2:
-        # Weekly pattern
-        df_work_copy = df_work.copy()
-        df_work_copy['weekday'] = df_work_copy['date'].dt.day_name()
-        weekly_data = df_work_copy.groupby('weekday')['duration'].sum().reindex(
-            ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-        ).fillna(0).reset_index()
-        
-        week_fig = px.bar(weekly_data, x='weekday', y='duration', title="Weekly Pattern")
-        week_fig.add_hline(y=st.session_state.daily_goal * 25, line_dash="dash", 
-                          line_color="red", annotation_text="Goal")
-        st.plotly_chart(week_fig, use_container_width=True)
-    
-    # 4. DETAILED BREAKDOWN TABLE
-    st.subheader("📋 Category & Task Breakdown")
-    
-    # Show category and task breakdown
-    breakdown = df_work.groupby(['category', 'task']).agg({
-        'duration': ['sum', 'count'],
-        'date': 'nunique'
-    }).round(0)
-    breakdown.columns = ['Total Minutes', 'Sessions', 'Days']
-    breakdown = breakdown.sort_values('Total Minutes', ascending=False)
-    breakdown['Hours'] = (breakdown['Total Minutes'] / 60).round(1)
-    
-    # Reorder columns for better display
-    breakdown = breakdown[['Hours', 'Total Minutes', 'Sessions', 'Days']]
-    st.dataframe(breakdown, use_container_width=True)
-    
-    # 5. KEY INSIGHTS
-    st.subheader("💡 Key Insights")
+    # === PSYCHOLOGY-DRIVEN INSIGHTS ===
+    st.subheader("🧠 Psychology Insights & Habit Formation")
     
     insight_col1, insight_col2, insight_col3 = st.columns(3)
     
     with insight_col1:
+        # Habit formation stage
+        if active_days <= 5:
+            st.info("🌱 **Formation Stage**\nSmall steps build big habits")
+        elif active_days <= 21:
+            progress = (active_days / 21) * 100
+            st.warning(f"🔥 **Building Stage**\n{progress:.0f}% to automatic habit")
+        else:
+            st.success("🎯 **Mastery Stage**\nHabit is becoming automatic!")
+        
         # Consistency score
         if len(daily_work_counts) >= 7:
-            last_7_days = [daily_work_counts.get(today - timedelta(days=i), 0) for i in range(7)]
-            consistency = len([d for d in last_7_days if d > 0]) / 7 * 100
-            st.metric("🎯 Consistency", f"{consistency:.0f}%")
-            if consistency >= 80:
-                st.success("Excellent!")
-            elif consistency >= 60:
-                st.info("Good")
-            else:
-                st.warning("Need improvement")
+            last_7_days = [daily_work_counts.get(today - timedelta(days=i), 0) >= min_streak_goal for i in range(7)]
+            consistency = sum(last_7_days) / 7 * 100
+            st.metric("📈 Weekly Consistency", f"{consistency:.0f}%")
     
     with insight_col2:
-        # Best day
+        # Best performance day
         if not df_work.empty:
             best_weekday = df_work.groupby(df_work['date'].dt.day_name())['duration'].sum().idxmax()
-            st.metric("💪 Best Day", best_weekday)
+            st.metric("💪 Peak Day", best_weekday)
             
-            # Peak hour
-            df_work_copy = df_work.copy()
-            df_work_copy['hour'] = pd.to_datetime(df_work_copy['time'], format='%I:%M %p', errors='coerce').dt.hour
-            if not df_work_copy['hour'].isna().all():
-                peak_hour = df_work_copy.groupby('hour')['duration'].sum().idxmax()
-                st.info(f"Peak: {peak_hour:02d}:00")
+            # Total achievement
+            total_minutes = df_work['duration'].sum()
+            total_hours = total_minutes // 60
+            st.metric("⏱️ Total Focus", f"{total_hours}h {total_minutes%60}m")
     
     with insight_col3:
-        # Total stats
-        total_minutes = df_work['duration'].sum()
-        total_hours = total_minutes // 60
-        st.metric("⏱️ Total Time", f"{total_hours}h {total_minutes%60}m")
-        
-        if len(daily_work_counts) >= 30:
-            avg_daily = daily_work_counts.tail(30).mean()
-            st.info(f"Avg: {avg_daily:.1f}/day")
-    
-    # Motivational messages
-    st.markdown("---")
-    if len(work_today) == 0:
-        st.warning("🚀 **Start Today:** Just one Pomodoro to begin!")
-    elif current_streak >= 7:
-        st.success(f"🔥 **{current_streak}-day streak!** You're building an amazing habit!")
-    elif current_streak >= 3:
-        st.info("💪 **Building momentum!** Keep the streak alive!")
-    
-    # Goal achievement insights
-    if len(daily_work_counts) >= 7:
-        recent_avg = daily_work_counts.tail(7).mean()
-        if recent_avg >= st.session_state.daily_goal:
-            st.success("📈 **Crushing your goals!** Consider raising the bar.")
-        elif recent_avg >= st.session_state.daily_goal * 0.75:
-            st.info("🎯 **Close to your goal!** Small push needed.")
+        # Achievement level
+        if current_streak >= 30:
+            st.success("🏆 **Master Level**\nYou've formed a strong habit!")
+        elif current_streak >= 21:
+            st.info("🌟 **Expert Level**\nHabit is nearly automatic!")
+        elif current_streak >= 7:
+            st.warning("📈 **Intermediate Level**\nBuilding strong momentum!")
+        elif current_streak >= 3:
+            st.info("🌱 **Beginner Level**\nGreat start, keep going!")
         else:
-            gap = st.session_state.daily_goal - recent_avg
-            st.info(f"💭 **{gap:.1f} more Pomodoros** needed to hit your daily target consistently.")
+            st.warning("🚀 **Ready to Start**\nBegin your journey today!")
+    
+    # === MOTIVATIONAL INSIGHTS ===
+    st.markdown("---")
+    st.subheader("💡 Personalized Coaching")
+    
+    # Science-backed motivational messages
+    if active_days == 1:
+        st.info("🎉 **Day 1 Complete!** Research shows it takes 21 days to form a habit. You've started!")
+    elif active_days == 7:
+        st.success("🔥 **Week 1 Done!** Your brain is already creating new neural pathways. Keep building!")
+    elif active_days == 21:
+        st.success("🏆 **21 Days!** Congratulations! Your habit is becoming automatic. The hardest part is behind you!")
+    elif active_days == 66:
+        st.success("👑 **66 Days!** You've reached the average time for habit automation. You're a productivity master!")
+    
+    # Adaptive encouragement
+    if today_progress == 0:
+        if current_streak > 0:
+            st.warning(f"🔥 **Don't break the {current_streak}-day streak!** Just {adaptive_goal} Pomodoro(s) to keep it alive.")
+        else:
+            st.info(f"🚀 **Start small:** Just {adaptive_goal} Pomodoro(s) today. Progress beats perfection!")
+    elif today_progress >= adaptive_goal:
+        if adaptive_goal < 4:
+            st.success(f"🎯 **Goal achieved!** Ready for the next level? Your brain can handle {adaptive_goal + 1} Pomodoros.")
+        else:
+            st.success("🏆 **Peak performance achieved!** You're operating at your optimal capacity.")
+    
+    # Personalized recommendations
+    if len(daily_work_counts) >= 14:
+        avg_weekly = daily_work_counts.tail(14).mean()
+        if avg_weekly < adaptive_goal * 0.7:
+            st.info(f"💡 **Tip:** Try scheduling Pomodoros at consistent times. Routine strengthens habit formation.")
+        elif current_streak < 7:
+            st.info("💪 **Focus on consistency** over intensity. Small daily wins build lasting habits.")
 
 else:
     st.info("📝 No work sessions recorded yet. Start your first Pomodoro!")
