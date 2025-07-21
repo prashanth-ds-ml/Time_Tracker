@@ -3,3 +3,4 @@ pygame
 plotly
 plotly-express
 pymongo
+pytz

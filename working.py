@@ -285,190 +285,26 @@ if records:
         best_day = df_cycles.idxmax()
         st.write(f"**Most Productive Day:** {best_day} with {df_cycles.max()} Pomodoro cycle(s)")
 
-    # === DAILY GOALS & STREAKS ===
     st.markdown("---")
-    st.header("🎯 Daily Goals & Progress")
-    
-    # Goal setting
-    if "daily_goal" not in st.session_state:
-        st.session_state.daily_goal = 4  # Default 4 pomodoros
-    
-    goal_col1, goal_col2 = st.columns(2)
-    with goal_col1:
-        new_goal = st.number_input("Daily Pomodoro Goal", min_value=1, max_value=20, value=st.session_state.daily_goal)
-        if new_goal != st.session_state.daily_goal:
-            st.session_state.daily_goal = new_goal
-    
-    with goal_col2:
-        today_progress = len(work_today)
-        progress_pct = min(100, (today_progress / st.session_state.daily_goal) * 100)
-        st.metric("Today's Progress", f"{today_progress}/{st.session_state.daily_goal}", 
-                 f"{progress_pct:.0f}% complete")
-    
-    # Progress bar
-    st.progress(progress_pct / 100)
-    if today_progress >= st.session_state.daily_goal:
-        st.success("🎉 Daily goal achieved! You're crushing it!")
-    elif today_progress >= st.session_state.daily_goal * 0.75:
-        st.info("💪 Almost there! Keep pushing!")
-    
-    st.markdown("---")
-    st.header("🔥 Streak Analytics")
-    
-    # Fixed streak calculation
-    daily_work_counts = df_work.groupby(df_work["date"].dt.date).size()
-    
-    # Calculate streaks properly
-    current_streak = 0
-    max_streak = 0
-    temp_streak = 0
-    
-    # Check last 365 days for comprehensive streak tracking
-    for i in range(365):
+    st.header("🔥 Streak Tracker (4+ Pomodoros/day)")
+
+    streak = 0
+    best_streak = 0
+    current = 0
+    for i in range(30):
         check_date = today - timedelta(days=i)
-        daily_count = daily_work_counts.get(check_date, 0)
-        
-        if daily_count >= st.session_state.daily_goal:
-            temp_streak += 1
-            max_streak = max(max_streak, temp_streak)
-            if i == 0:  # Today
-                current_streak = temp_streak
+        if check_date in df_cycles.index and df_cycles[check_date] >= 1:
+            current += 1
+            best_streak = max(best_streak, current)
+            if i == 0:
+                streak = current
         else:
             if i == 0:
-                current_streak = 0
-            temp_streak = 0
-    
-    streak_col1, streak_col2, streak_col3 = st.columns(3)
-    streak_col1.metric("🔥 Current Streak", f"{current_streak} day(s)")
-    streak_col2.metric("🏆 Best Streak", f"{max_streak} day(s)")
-    
-    # Streak motivation
-    if current_streak == 0:
-        streak_col3.metric("💡 Motivation", "Start today!")
-    elif current_streak < 7:
-        streak_col3.metric("💪 Keep Going", f"{7-current_streak} to week!")
-    else:
-        streak_col3.metric("🌟 Amazing!", "On fire!")
-    
-    # === ENHANCED VISUALIZATIONS ===
-    st.markdown("---")
-    st.header("📈 Time Analysis & Insights")
-    
-    # 1. Weekly heatmap
-    st.subheader("📅 Weekly Activity Heatmap")
-    df_work_copy = df_work.copy()
-    df_work_copy['weekday'] = df_work_copy['date'].dt.day_name()
-    df_work_copy['week'] = df_work_copy['date'].dt.isocalendar().week
-    
-    weekly_data = df_work_copy.groupby(['week', 'weekday'])['duration'].sum().reset_index()
-    
-    if not weekly_data.empty:
-        heatmap_fig = px.density_heatmap(
-            weekly_data, 
-            x='weekday', 
-            y='week',
-            z='duration',
-            title="Weekly Activity Pattern (Minutes per Day)",
-            color_continuous_scale="Blues"
-        )
-        st.plotly_chart(heatmap_fig, use_container_width=True)
-    
-    # 2. Time distribution pie chart
-    st.subheader("🥧 Time Distribution by Category")
-    if not df_work.empty:
-        category_time = df_work.groupby('category')['duration'].sum().reset_index()
-        pie_fig = px.pie(
-            category_time, 
-            values='duration', 
-            names='category',
-            title="How You Spend Your Focus Time"
-        )
-        st.plotly_chart(pie_fig, use_container_width=True)
-    
-    # 3. Performance trends
-    st.subheader("📊 Performance Trends (Last 30 Days)")
-    last_30_days = df_work[df_work['date'] >= (datetime.now(IST) - timedelta(days=30))]
-    
-    if not last_30_days.empty:
-        trend_data = last_30_days.groupby(last_30_days['date'].dt.date).agg({
-            'duration': 'sum',
-            'task': 'count'
-        }).reset_index()
-        trend_data.columns = ['date', 'total_minutes', 'pomodoro_count']
-        trend_data['efficiency'] = trend_data['total_minutes'] / trend_data['pomodoro_count']
-        
-        # Dual axis chart
-        trend_fig = px.line(
-            trend_data, 
-            x='date', 
-            y='pomodoro_count',
-            title="Daily Pomodoro Count vs Goal",
-            labels={'pomodoro_count': 'Pomodoros Completed'}
-        )
-        trend_fig.add_hline(y=st.session_state.daily_goal, line_dash="dash", 
-                           line_color="red", annotation_text="Daily Goal")
-        st.plotly_chart(trend_fig, use_container_width=True)
-    
-    # === PSYCHOLOGY-DRIVEN INSIGHTS ===
-    st.markdown("---")
-    st.header("🧠 Psychology Insights & Motivation")
-    
-    insight_col1, insight_col2 = st.columns(2)
-    
-    with insight_col1:
-        st.subheader("📈 Consistency Score")
-        if len(daily_work_counts) >= 7:
-            last_7_days = [daily_work_counts.get(today - timedelta(days=i), 0) 
-                          for i in range(7)]
-            consistency = len([d for d in last_7_days if d > 0]) / 7 * 100
-            st.metric("7-Day Consistency", f"{consistency:.0f}%")
-            
-            if consistency >= 80:
-                st.success("🌟 Excellent consistency! You're building a strong habit.")
-            elif consistency >= 60:
-                st.info("👍 Good consistency! Try to fill in the gaps.")
-            else:
-                st.warning("⚠️ Focus on consistency. Small daily wins compound!")
-        else:
-            st.info("Complete 7 days to see your consistency score.")
-    
-    with insight_col2:
-        st.subheader("⚡ Peak Performance")
-        if not df_work.empty:
-            df_work_copy = df_work.copy()
-            df_work_copy['hour'] = pd.to_datetime(df_work_copy['time'], format='%I:%M %p').dt.hour
-            peak_hour = df_work_copy.groupby('hour')['duration'].sum().idxmax()
-            peak_time = f"{peak_hour:02d}:00"
-            st.metric("Most Productive Hour", peak_time)
-            st.info(f"💡 Schedule important tasks around {peak_time} for maximum efficiency!")
-    
-    # Motivational insights
-    st.subheader("💡 Personalized Insights")
-    
-    if len(work_today) == 0:
-        st.warning("🚀 **Getting Started Tip:** Just complete 1 Pomodoro today. The hardest part is starting!")
-    elif current_streak >= 7:
-        st.success(f"🔥 **Streak Master:** {current_streak} days strong! You're in the top 10% of consistent users.")
-    elif current_streak >= 3:
-        st.info("💪 **Building Momentum:** Great streak! Research shows it takes 21 days to form a habit.")
-    
-    # Goal achievement prediction
-    if len(daily_work_counts) >= 7:
-        avg_daily = daily_work_counts.tail(7).mean()
-        if avg_daily >= st.session_state.daily_goal:
-            st.success("📈 **Goal Achiever:** You're consistently meeting your goals! Consider raising the bar.")
-        else:
-            gap = st.session_state.daily_goal - avg_daily
-            st.info(f"🎯 **Goal Gap:** You're {gap:.1f} Pomodoros away from your daily goal on average. Small adjustments lead to big wins!")
-    
-    # Weekly reflection
-    if datetime.now(IST).weekday() == 6:  # Sunday
-        week_total = daily_work_counts.get(today, 0)
-        for i in range(1, 7):
-            week_total += daily_work_counts.get(today - timedelta(days=i), 0)
-        
-        st.subheader("📝 Weekly Reflection")
-        st.info(f"This week you completed {week_total} Pomodoros. What went well? What can you improve next week?")
+                streak = 0
+            current = 0
+
+    st.metric("🔥 Current Streak", f"{streak} day(s)")
+    st.metric("🏆 Best Streak", f"{best_streak} day(s)")
 else:
     st.info("No log records found in MongoDB.")
 
