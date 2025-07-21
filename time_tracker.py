@@ -380,84 +380,372 @@ if records:
     
     # === ENHANCED VISUALIZATIONS ===
     st.markdown("---")
-    st.header("📈 Time Analysis & Insights")
+    st.header("📈 Advanced Analytics & Insights")
     
-    # 1. Weekly heatmap
-    st.subheader("📅 Weekly Activity Heatmap")
+    # 1. Productivity Score Dashboard
+    st.subheader("🎯 Productivity Score & Performance Index")
+    
+    # Calculate productivity metrics
+    recent_7_days = [daily_work_counts.get(today - timedelta(days=i), 0) for i in range(7)]
+    recent_30_days = [daily_work_counts.get(today - timedelta(days=i), 0) for i in range(30)]
+    
+    consistency_7d = len([d for d in recent_7_days if d > 0]) / 7 * 100
+    avg_daily_7d = sum(recent_7_days) / 7
+    goal_achievement_7d = len([d for d in recent_7_days if d >= st.session_state.daily_goal]) / 7 * 100
+    
+    # Productivity score (weighted combination)
+    productivity_score = (consistency_7d * 0.4 + goal_achievement_7d * 0.4 + min(avg_daily_7d/st.session_state.daily_goal * 100, 100) * 0.2)
+    
+    score_col1, score_col2, score_col3, score_col4 = st.columns(4)
+    score_col1.metric("📊 Productivity Score", f"{productivity_score:.0f}/100", 
+                     delta=f"{productivity_score-75:.0f}" if productivity_score > 75 else None)
+    score_col2.metric("🎯 Goal Achievement", f"{goal_achievement_7d:.0f}%")
+    score_col3.metric("⚡ Daily Average", f"{avg_daily_7d:.1f}")
+    score_col4.metric("🔥 Consistency", f"{consistency_7d:.0f}%")
+    
+    # Performance gauge
+    import plotly.graph_objects as go
+    gauge_fig = go.Figure(go.Indicator(
+        mode = "gauge+number+delta",
+        value = productivity_score,
+        domain = {'x': [0, 1], 'y': [0, 1]},
+        title = {'text': "Productivity Index"},
+        delta = {'reference': 75, 'increasing': {'color': "green"}},
+        gauge = {
+            'axis': {'range': [None, 100]},
+            'bar': {'color': "darkblue"},
+            'steps': [
+                {'range': [0, 50], 'color': "lightgray"},
+                {'range': [50, 75], 'color': "yellow"},
+                {'range': [75, 90], 'color': "lightgreen"},
+                {'range': [90, 100], 'color': "green"}],
+            'threshold': {
+                'line': {'color': "red", 'width': 4},
+                'thickness': 0.75,
+                'value': 90}}))
+    gauge_fig.update_layout(height=300)
+    st.plotly_chart(gauge_fig, use_container_width=True)
+    
+    # 2. Time of Day Performance Analysis
+    st.subheader("⏰ Peak Performance Times")
+    if not df_work.empty:
+        df_work_copy = df_work.copy()
+        df_work_copy['hour'] = pd.to_datetime(df_work_copy['time'], format='%I:%M %p', errors='coerce').dt.hour
+        df_work_copy = df_work_copy.dropna(subset=['hour'])
+        
+        if not df_work_copy.empty:
+            hourly_performance = df_work_copy.groupby('hour').agg({
+                'duration': ['sum', 'count', 'mean']
+            }).round(2)
+            hourly_performance.columns = ['Total Minutes', 'Sessions', 'Avg Duration']
+            hourly_performance = hourly_performance.reset_index()
+            
+            # Create dual-axis chart
+            perf_fig = px.bar(hourly_performance, x='hour', y='Total Minutes', 
+                             title="Productivity by Hour of Day",
+                             labels={'hour': 'Hour (24h format)', 'Total Minutes': 'Total Minutes Worked'})
+            
+            # Add sessions as line
+            perf_fig.add_scatter(x=hourly_performance['hour'], y=hourly_performance['Sessions']*5, 
+                               mode='lines+markers', name='Sessions (×5)', yaxis='y')
+            
+            st.plotly_chart(perf_fig, use_container_width=True)
+            
+            # Show insights
+            best_hour = hourly_performance.loc[hourly_performance['Total Minutes'].idxmax(), 'hour']
+            most_sessions_hour = hourly_performance.loc[hourly_performance['Sessions'].idxmax(), 'hour']
+            
+            insight_col1, insight_col2 = st.columns(2)
+            insight_col1.info(f"🏆 **Peak Productivity:** {best_hour:02d}:00 - {best_hour+1:02d}:00")
+            insight_col2.info(f"🔥 **Most Active:** {most_sessions_hour:02d}:00 - {most_sessions_hour+1:02d}:00")
+    
+    # 3. Weekly Pattern Analysis
+    st.subheader("📅 Weekly Performance Pattern")
     df_work_copy = df_work.copy()
     df_work_copy['weekday'] = df_work_copy['date'].dt.day_name()
-    df_work_copy['week'] = df_work_copy['date'].dt.isocalendar().week
+    df_work_copy['weekday_num'] = df_work_copy['date'].dt.dayofweek
     
-    weekly_data = df_work_copy.groupby(['week', 'weekday'])['duration'].sum().reset_index()
+    weekly_pattern = df_work_copy.groupby(['weekday', 'weekday_num']).agg({
+        'duration': ['sum', 'count', 'mean']
+    }).round(2)
+    weekly_pattern.columns = ['Total Minutes', 'Sessions', 'Avg Session']
+    weekly_pattern = weekly_pattern.reset_index().sort_values('weekday_num')
     
-    if not weekly_data.empty:
-        heatmap_fig = px.density_heatmap(
-            weekly_data, 
-            x='weekday', 
-            y='week',
-            z='duration',
-            title="Weekly Activity Pattern (Minutes per Day)",
-            color_continuous_scale="Blues"
-        )
-        st.plotly_chart(heatmap_fig, use_container_width=True)
+    # Create comprehensive weekly chart
+    week_fig = px.bar(weekly_pattern, x='weekday', y='Total Minutes',
+                     title="Weekly Performance Pattern",
+                     color='Sessions', color_continuous_scale='Blues')
     
-    # 2. Calendar view for streak visualization
-    st.subheader("📅 Consistency Calendar (Last 60 Days)")
+    # Add goal line
+    weekly_goal = st.session_state.daily_goal * 25  # 25 min per pomodoro
+    week_fig.add_hline(y=weekly_goal, line_dash="dash", line_color="red", 
+                      annotation_text=f"Daily Goal ({weekly_goal} min)")
     
-    # Create calendar data
+    st.plotly_chart(week_fig, use_container_width=True)
+    
+    # Weekly insights
+    best_day = weekly_pattern.loc[weekly_pattern['Total Minutes'].idxmax(), 'weekday']
+    worst_day = weekly_pattern.loc[weekly_pattern['Total Minutes'].idxmin(), 'weekday']
+    
+    week_col1, week_col2, week_col3 = st.columns(3)
+    week_col1.success(f"🌟 **Strongest Day:** {best_day}")
+    week_col2.warning(f"💪 **Growth Day:** {worst_day}")
+    week_col3.info(f"📊 **Weekend vs Weekday:** {weekly_pattern.iloc[-2:]['Total Minutes'].mean():.0f} vs {weekly_pattern.iloc[:-2]['Total Minutes'].mean():.0f}")
+    
+    # 4. Focus Deep Dive Analysis
+    st.subheader("🧠 Focus & Distraction Analysis")
+    
+    if not df_work.empty:
+        # Session length analysis
+        focus_col1, focus_col2 = st.columns(2)
+        
+        with focus_col1:
+            # Analyze session clustering (how often sessions are back-to-back)
+            df_work_sorted = df_work.sort_values(['date', 'time'])
+            df_work_sorted['session_gap'] = df_work_sorted.groupby(df_work_sorted['date'].dt.date)['time'].shift(-1)
+            
+            # Focus session distribution
+            session_dist = df_work.groupby(df_work['date'].dt.date).size()
+            
+            focus_fig = px.histogram(x=session_dist.values, nbins=10,
+                                   title="Focus Sessions Distribution",
+                                   labels={'x': 'Sessions per Day', 'y': 'Number of Days'})
+            focus_fig.add_vline(x=st.session_state.daily_goal, line_dash="dash", 
+                               line_color="red", annotation_text="Goal")
+            st.plotly_chart(focus_fig, use_container_width=True)
+        
+        with focus_col2:
+            # Category switching analysis (shows focus vs multitasking)
+            daily_categories = df_work.groupby(df_work['date'].dt.date)['category'].nunique()
+            
+            switch_fig = px.histogram(x=daily_categories.values, nbins=8,
+                                    title="Daily Category Switching",
+                                    labels={'x': 'Categories per Day', 'y': 'Number of Days'})
+            st.plotly_chart(switch_fig, use_container_width=True)
+            
+            avg_categories = daily_categories.mean()
+            if avg_categories <= 2:
+                st.success("🎯 **High Focus:** You typically stick to 1-2 categories daily!")
+            elif avg_categories <= 3:
+                st.info("⚖️ **Balanced:** Good balance between focus and variety.")
+            else:
+                st.warning("🔄 **High Switching:** Consider reducing daily category switching for better focus.")
+    
+    # 5. Progress Momentum Chart
+    st.subheader("🚀 Progress Momentum & Trends")
+    
+    # Calculate 7-day rolling averages
+    if len(daily_work_counts) >= 7:
+        last_60_days_data = []
+        for i in range(60):
+            check_date = today - timedelta(days=59-i)
+            daily_count = daily_work_counts.get(check_date, 0)
+            last_60_days_data.append({
+                'date': check_date,
+                'sessions': daily_count,
+                'minutes': daily_count * 25
+            })
+        
+        momentum_df = pd.DataFrame(last_60_days_data)
+        momentum_df['rolling_avg'] = momentum_df['sessions'].rolling(window=7, center=True).mean()
+        momentum_df['trend'] = momentum_df['rolling_avg'].diff()
+        
+        # Create momentum chart
+        momentum_fig = px.line(momentum_df, x='date', y='sessions', 
+                              title="Daily Sessions with 7-Day Trend",
+                              labels={'sessions': 'Daily Sessions', 'date': 'Date'})
+        
+        momentum_fig.add_scatter(x=momentum_df['date'], y=momentum_df['rolling_avg'], 
+                               mode='lines', name='7-Day Average', line=dict(color='red', width=3))
+        
+        momentum_fig.add_hline(y=st.session_state.daily_goal, line_dash="dash", 
+                              line_color="green", annotation_text="Goal")
+        
+        st.plotly_chart(momentum_fig, use_container_width=True)
+        
+        # Momentum insights
+        recent_trend = momentum_df['trend'].tail(7).mean()
+        if recent_trend > 0.1:
+            st.success("📈 **Upward Momentum:** You're trending upward! Keep the energy!")
+        elif recent_trend < -0.1:
+            st.warning("📉 **Downward Trend:** Time to refocus and rebuild momentum.")
+        else:
+            st.info("➡️ **Steady State:** Consistent performance, consider pushing for growth.")
+    
+    # 6. Category Performance Matrix
+    st.subheader("📊 Category Performance Matrix")
+    if not df_work.empty and len(df_work['category'].unique()) > 1:
+        category_analysis = df_work.groupby('category').agg({
+            'duration': ['sum', 'count', 'mean'],
+            'date': 'nunique'
+        }).round(2)
+        category_analysis.columns = ['Total Minutes', 'Sessions', 'Avg Duration', 'Days Active']
+        category_analysis['Efficiency'] = category_analysis['Total Minutes'] / category_analysis['Sessions']
+        category_analysis['Consistency'] = category_analysis['Sessions'] / category_analysis['Days Active']
+        category_analysis = category_analysis.reset_index()
+        
+        # Create performance matrix scatter plot
+        matrix_fig = px.scatter(category_analysis, x='Efficiency', y='Consistency',
+                               size='Total Minutes', color='Sessions',
+                               hover_data=['category'], title="Category Performance Matrix",
+                               labels={'Efficiency': 'Minutes per Session', 
+                                      'Consistency': 'Sessions per Active Day'})
+        
+        # Add quadrant lines
+        avg_efficiency = category_analysis['Efficiency'].mean()
+        avg_consistency = category_analysis['Consistency'].mean()
+        
+        matrix_fig.add_hline(y=avg_consistency, line_dash="dot", line_color="gray")
+        matrix_fig.add_vline(x=avg_efficiency, line_dash="dot", line_color="gray")
+        
+        st.plotly_chart(matrix_fig, use_container_width=True)
+        
+        # Performance insights
+        top_category = category_analysis.loc[category_analysis['Total Minutes'].idxmax(), 'category']
+        most_consistent = category_analysis.loc[category_analysis['Consistency'].idxmax(), 'category']
+        most_efficient = category_analysis.loc[category_analysis['Efficiency'].idxmax(), 'category']
+        
+        perf_col1, perf_col2, perf_col3 = st.columns(3)
+        perf_col1.metric("🏆 Most Time", top_category)
+        perf_col2.metric("🎯 Most Consistent", most_consistent)
+        perf_col3.metric("⚡ Most Efficient", most_efficient)
+    
+    # 7. Smart Calendar View with Streak Visualization
+    st.subheader("📅 Smart Consistency Calendar")
+    
+    # Create enhanced calendar data
     calendar_data = []
-    for i in range(60):
-        check_date = today - timedelta(days=59-i)
+    for i in range(42):  # 6 weeks view
+        check_date = today - timedelta(days=41-i)
         daily_count = daily_work_counts.get(check_date, 0)
         daily_minutes = df_work[df_work['date'].dt.date == check_date]['duration'].sum()
         
-        # Define consistency levels
-        if daily_minutes >= 50:  # 2 pomodoros = 50 minutes
-            status = "🔥 Perfect"
-            color = "green"
-        elif daily_minutes >= 25:  # 1 pomodoro = 25 minutes
-            status = "💪 Good"
-            color = "orange"
+        # Enhanced status levels
+        if daily_minutes >= st.session_state.daily_goal * 25:
+            status = "🔥 Goal Crushed"
+            intensity = 4
+            color = "#00FF00"
+        elif daily_minutes >= 50:
+            status = "💪 Strong Day"
+            intensity = 3
+            color = "#90EE90"
+        elif daily_minutes >= 25:
+            status = "⚡ Good Start"
+            intensity = 2
+            color = "#FFFF00"
         elif daily_minutes > 0:
-            status = "⚡ Started"
-            color = "yellow"
+            status = "👶 Baby Steps"
+            intensity = 1
+            color = "#FFA500"
         else:
-            status = "❌ Miss"
-            color = "lightgray"
+            status = "❌ Rest Day"
+            intensity = 0
+            color = "#LIGHTGRAY"
         
         calendar_data.append({
             'date': check_date,
+            'date_str': check_date.strftime('%b %d'),
             'minutes': daily_minutes,
             'pomodoros': daily_count,
             'status': status,
+            'intensity': intensity,
             'color': color,
-            'week': check_date.isocalendar()[1],
+            'week': check_date.isocalendar()[1] - today.isocalendar()[1] + 6,
             'weekday': check_date.strftime('%a'),
-            'day': check_date.day
+            'day': check_date.day,
+            'is_today': check_date == today,
+            'is_weekend': check_date.weekday() >= 5
         })
     
     calendar_df = pd.DataFrame(calendar_data)
     
-    # Create calendar visualization
+    # Create interactive calendar heatmap
     if not calendar_df.empty:
+        # Custom color scale based on intensity
         calendar_fig = px.scatter(
             calendar_df,
             x='weekday',
             y='week',
             size='minutes',
-            color='minutes',
-            hover_data=['date', 'pomodoros', 'status'],
-            title="Consistency Calendar (Bubble size = minutes worked)",
-            color_continuous_scale="RdYlGn",
-            size_max=20
+            color='intensity',
+            hover_data={
+                'date_str': True,
+                'pomodoros': True,
+                'status': True,
+                'minutes': True,
+                'weekday': False,
+                'week': False,
+                'intensity': False
+            },
+            title="6-Week Consistency Heatmap (Hover for details)",
+            color_continuous_scale=[[0, '#LIGHTGRAY'], [0.25, '#FFA500'], 
+                                   [0.5, '#FFFF00'], [0.75, '#90EE90'], [1, '#00FF00']],
+            size_max=30
         )
-        calendar_fig.update_layout(height=400)
+        
+        # Highlight today
+        today_data = calendar_df[calendar_df['is_today']]
+        if not today_data.empty:
+            calendar_fig.add_scatter(
+                x=today_data['weekday'],
+                y=today_data['week'],
+                mode='markers',
+                marker=dict(size=35, color='red', symbol='circle-open', line=dict(width=3)),
+                name='Today',
+                showlegend=False
+            )
+        
+        calendar_fig.update_layout(height=400, showlegend=False)
         st.plotly_chart(calendar_fig, use_container_width=True)
         
-        # Consistency legend
+        # Enhanced legend with insights
+        perfect_days = len(calendar_df[calendar_df['intensity'] == 4])
+        good_days = len(calendar_df[calendar_df['intensity'] >= 2])
+        
+        cal_col1, cal_col2, cal_col3 = st.columns(3)
+        cal_col1.metric("🔥 Goal Achieved Days", perfect_days)
+        cal_col2.metric("💪 Productive Days", good_days)
+        cal_col3.metric("📈 Success Rate", f"{(good_days/42*100):.0f}%")
+        
         st.markdown("""
-        **Legend:** 🔥 Perfect (50+ min) | 💪 Good (25-49 min) | ⚡ Started (<25 min) | ❌ Miss (0 min)
+        **Legend:** 🔥 Goal Crushed (Target met) | 💪 Strong (50+ min) | ⚡ Good Start (25+ min) | 👶 Baby Steps (<25 min) | ❌ Rest Day (0 min)
         """)
+    
+    # 8. Weekend vs Weekday Analysis
+    st.subheader("🏖️ Weekend vs Weekday Performance")
+    
+    df_work_copy = df_work.copy()
+    df_work_copy['is_weekend'] = df_work_copy['date'].dt.dayofweek >= 5
+    
+    weekend_analysis = df_work_copy.groupby('is_weekend').agg({
+        'duration': ['sum', 'mean', 'count']
+    }).round(2)
+    weekend_analysis.columns = ['Total Minutes', 'Avg Minutes', 'Sessions']
+    weekend_analysis.index = ['Weekdays', 'Weekends']
+    
+    ww_col1, ww_col2 = st.columns(2)
+    
+    with ww_col1:
+        ww_fig = px.bar(weekend_analysis.reset_index(), x='index', y='Total Minutes',
+                       title="Weekday vs Weekend Total",
+                       color='Total Minutes', color_continuous_scale='Blues')
+        st.plotly_chart(ww_fig, use_container_width=True)
+    
+    with ww_col2:
+        avg_fig = px.bar(weekend_analysis.reset_index(), x='index', y='Avg Minutes',
+                        title="Average Daily Performance",
+                        color='Avg Minutes', color_continuous_scale='Greens')
+        st.plotly_chart(avg_fig, use_container_width=True)
+    
+    # Weekend insights
+    weekend_ratio = weekend_analysis.loc['Weekends', 'Avg Minutes'] / weekend_analysis.loc['Weekdays', 'Avg Minutes'] if weekend_analysis.loc['Weekdays', 'Avg Minutes'] > 0 else 0
+    
+    if weekend_ratio > 0.8:
+        st.success("🏆 **Weekend Warrior:** You maintain great productivity on weekends!")
+    elif weekend_ratio > 0.5:
+        st.info("⚖️ **Balanced:** Good weekend vs weekday balance.")
+    else:
+        st.warning("🔄 **Weekend Opportunity:** Consider light weekend sessions to maintain momentum.")
     
     # 3. Enhanced time distribution by category AND task
     st.subheader("🥧 Time Distribution by Category & Tasks")
