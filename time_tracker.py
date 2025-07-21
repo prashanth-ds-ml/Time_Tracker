@@ -442,26 +442,35 @@ elif page == "📊 Analytics":
         }).rename(columns={'date': 'sessions'}).reset_index()
         
         if len(task_category_data) > 0:
-            # Create bubble chart
-            fig = px.scatter(task_category_data, 
-                           x='category', 
-                           y='task',
-                           size='duration',
-                           color='category',
-                           hover_data=['sessions', 'duration'],
-                           title="Task Distribution by Category (Bubble Size = Time Spent)",
-                           labels={'duration': 'Minutes', 'sessions': 'Sessions'})
-            
-            fig.update_layout(
-                height=500,
-                xaxis_tickangle=-45,
-                showlegend=False
-            )
-            
-            # Adjust bubble sizes for better visibility
-            fig.update_traces(marker=dict(sizemode='diameter', sizemin=10, sizemax=50))
-            
-            st.plotly_chart(fig, use_container_width=True)
+            try:
+                # Create bubble chart
+                fig = px.scatter(task_category_data, 
+                               x='category', 
+                               y='task',
+                               size='duration',
+                               color='category',
+                               hover_data=['sessions', 'duration'],
+                               title="Task Distribution by Category (Bubble Size = Time Spent)",
+                               labels={'duration': 'Minutes', 'sessions': 'Sessions'})
+                
+                fig.update_layout(
+                    height=500,
+                    xaxis_tickangle=-45,
+                    showlegend=False
+                )
+                
+                # Adjust bubble sizes more safely
+                fig.update_traces(marker_sizemin=8, marker_sizemax=40)
+                
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                # Fallback: Simple bar chart if bubble chart fails
+                st.warning("Bubble chart unavailable, showing bar chart instead")
+                fig = px.bar(task_category_data.sort_values('duration', ascending=False).head(10), 
+                           x='duration', y='task', orientation='h',
+                           title="Top Tasks by Duration")
+                fig.update_layout(height=400)
+                st.plotly_chart(fig, use_container_width=True)
             
             # Show summary table below
             with st.expander("📋 Detailed Breakdown"):
