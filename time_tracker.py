@@ -73,10 +73,17 @@ if not users:
 col_user, col_page, col_add = st.columns([2, 3, 2])
 
 with col_user:
-    user_select = st.selectbox("👤 User", users, 
-                              index=users.index(st.session_state.user) if st.session_state.user in users else 0,
-                              key="user_select")
-    st.session_state.user = user_select
+    # Ensure user selection is consistent
+    if st.session_state.user not in users:
+        st.session_state.user = users[0]
+    
+    current_index = users.index(st.session_state.user) if st.session_state.user in users else 0
+    user_select = st.selectbox("👤 User", users, index=current_index, key="user_select")
+    
+    # Only update if actually changed to prevent unnecessary reruns
+    if user_select != st.session_state.user:
+        st.session_state.user = user_select
+        st.rerun()
 
 with col_page:
     page = st.selectbox("📍 Navigate", ["🎯 Focus Timer", "📝 Notes Saver", "📊 Analytics", "🗂️ Notes Viewer"])
@@ -85,10 +92,12 @@ with col_add:
     with st.expander("➕ Add User"):
         new_user = st.text_input("Username", placeholder="Enter new username")
         if st.button("Add") and new_user:
-            if new_user not in users:
-                add_user(new_user)
-                st.session_state.user = new_user
+            if new_user.strip() and new_user not in users:
+                add_user(new_user.strip())
+                st.session_state.user = new_user.strip()
                 st.rerun()
+            elif new_user in users:
+                st.warning("User already exists!")
 
 # === NOTES FUNCTIONALITY ===
 def add_note(content, date):
@@ -401,7 +410,7 @@ elif page == "📊 Analytics":
 
     # 2. Category and Task Breakdown
     if len(df_work) > 0:
-        col1, col2 = st.columns(2)
+        col1, col2 = st.columns([1, 1])
 
         with col1:
             st.subheader("📂 Category Breakdown")
@@ -415,13 +424,59 @@ elif page == "📊 Analytics":
 
         with col2:
             st.subheader("🎯 Top Tasks")
-            task_data = df_work.groupby('task')['duration'].sum().sort_values(ascending=False).head(10)
+            task_data = df_work.groupby('task')['duration'].sum().sort_values(ascending=False).head(8)
 
             if len(task_data) > 0:
                 fig = px.bar(x=task_data.values, y=task_data.index, 
-                           orientation='h', title="Top Tasks by Time (Minutes)")
+                           orientation='h', title="Top Tasks by Time")
                 fig.update_layout(height=350)
                 st.plotly_chart(fig, use_container_width=True)
+
+        # 3. Category-Task Bubble Chart
+        st.subheader("🫧 Category-Task Bubble View")
+        
+        # Prepare data for bubble chart
+        task_category_data = df_work.groupby(['category', 'task']).agg({
+            'duration': 'sum',
+            'date': 'count'
+        }).rename(columns={'date': 'sessions'}).reset_index()
+        
+        if len(task_category_data) > 0:
+            # Create bubble chart
+            fig = px.scatter(task_category_data, 
+                           x='category', 
+                           y='task',
+                           size='duration',
+                           color='category',
+                           hover_data=['sessions', 'duration'],
+                           title="Task Distribution by Category (Bubble Size = Time Spent)",
+                           labels={'duration': 'Minutes', 'sessions': 'Sessions'})
+            
+            fig.update_layout(
+                height=500,
+                xaxis_tickangle=-45,
+                showlegend=False
+            )
+            
+            # Adjust bubble sizes for better visibility
+            fig.update_traces(marker=dict(sizemode='diameter', sizemin=10, sizemax=50))
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Show summary table below
+            with st.expander("📋 Detailed Breakdown"):
+                summary_table = task_category_data.sort_values('duration', ascending=False)
+                summary_table['duration_hours'] = (summary_table['duration'] / 60).round(2)
+                st.dataframe(
+                    summary_table[['category', 'task', 'sessions', 'duration_hours']],
+                    column_config={
+                        'category': 'Category',
+                        'task': 'Task',
+                        'sessions': 'Sessions',
+                        'duration_hours': 'Hours'
+                    },
+                    use_container_width=True
+                )
 
     st.divider()
 
