@@ -165,15 +165,36 @@ st.markdown("---")
 st.header("🎯 Start a Work Session")
 
 # === Category Input ===
-cat_options = st.session_state.custom_categories + ["➕ Add New Category"]
-category_selection = st.selectbox("Select Category", cat_options)
+col_cat1, col_cat2 = st.columns([3, 1])
 
+with col_cat1:
+    cat_options = st.session_state.custom_categories + ["➕ Add New Category"]
+    category_selection = st.selectbox("Select Category", cat_options)
+
+with col_cat2:
+    st.markdown("<br>", unsafe_allow_html=True)  # Add spacing
+    if st.button("🗑️ Manage"):
+        with st.expander("Manage Categories", expanded=True):
+            st.write("**Current Categories:**")
+            for i, cat in enumerate(st.session_state.custom_categories):
+                col_a, col_b = st.columns([4, 1])
+                col_a.write(f"• {cat}")
+                if col_b.button("🗑️", key=f"del_{i}"):
+                    st.session_state.custom_categories.remove(cat)
+                    st.rerun()
+
+# Handle category selection/addition
 if category_selection == "➕ Add New Category":
-    new_cat = st.text_input("Enter New Category")
-    if new_cat:
+    new_cat = st.text_input("Enter New Category", placeholder="e.g., Reading, Exercise, Project X")
+    if st.button("✅ Add Category") and new_cat:
         if new_cat not in st.session_state.custom_categories:
             st.session_state.custom_categories.append(new_cat)
-        st.session_state.category = new_cat
+            st.session_state.category = new_cat
+            st.success(f"Added category: {new_cat}")
+            st.rerun()
+        else:
+            st.warning("Category already exists!")
+    st.session_state.category = new_cat if new_cat else ""
 else:
     st.session_state.category = category_selection
 
@@ -291,9 +312,9 @@ if records:
     
     # Goal setting
     if "daily_goal" not in st.session_state:
-        st.session_state.daily_goal = 4  # Default 4 pomodoros
+        st.session_state.daily_goal = 2  # Default 2 pomodoros (50 minutes)
     
-    goal_col1, goal_col2 = st.columns(2)
+    goal_col1, goal_col2, goal_col3 = st.columns(3)
     with goal_col1:
         new_goal = st.number_input("Daily Pomodoro Goal", min_value=1, max_value=20, value=st.session_state.daily_goal)
         if new_goal != st.session_state.daily_goal:
@@ -301,9 +322,14 @@ if records:
     
     with goal_col2:
         today_progress = len(work_today)
+        today_minutes = work_today['duration'].sum()
         progress_pct = min(100, (today_progress / st.session_state.daily_goal) * 100)
         st.metric("Today's Progress", f"{today_progress}/{st.session_state.daily_goal}", 
                  f"{progress_pct:.0f}% complete")
+    
+    with goal_col3:
+        st.metric("Minutes Today", f"{today_minutes} min", 
+                 f"Target: {st.session_state.daily_goal * 25} min")
     
     # Progress bar
     st.progress(progress_pct / 100)
@@ -311,6 +337,8 @@ if records:
         st.success("🎉 Daily goal achieved! You're crushing it!")
     elif today_progress >= st.session_state.daily_goal * 0.75:
         st.info("💪 Almost there! Keep pushing!")
+    elif today_minutes >= 25:
+        st.info("⚡ Good start! Keep the momentum going!")
     
     st.markdown("---")
     st.header("🔥 Streak Analytics")
@@ -373,21 +401,110 @@ if records:
         )
         st.plotly_chart(heatmap_fig, use_container_width=True)
     
-    # 2. Time distribution pie chart
-    st.subheader("🥧 Time Distribution by Category")
-    if not df_work.empty:
-        category_time = df_work.groupby('category')['duration'].sum().reset_index()
-        pie_fig = px.pie(
-            category_time, 
-            values='duration', 
-            names='category',
-            title="How You Spend Your Focus Time"
+    # 2. Calendar view for streak visualization
+    st.subheader("📅 Consistency Calendar (Last 60 Days)")
+    
+    # Create calendar data
+    calendar_data = []
+    for i in range(60):
+        check_date = today - timedelta(days=59-i)
+        daily_count = daily_work_counts.get(check_date, 0)
+        daily_minutes = df_work[df_work['date'].dt.date == check_date]['duration'].sum()
+        
+        # Define consistency levels
+        if daily_minutes >= 50:  # 2 pomodoros = 50 minutes
+            status = "🔥 Perfect"
+            color = "green"
+        elif daily_minutes >= 25:  # 1 pomodoro = 25 minutes
+            status = "💪 Good"
+            color = "orange"
+        elif daily_minutes > 0:
+            status = "⚡ Started"
+            color = "yellow"
+        else:
+            status = "❌ Miss"
+            color = "lightgray"
+        
+        calendar_data.append({
+            'date': check_date,
+            'minutes': daily_minutes,
+            'pomodoros': daily_count,
+            'status': status,
+            'color': color,
+            'week': check_date.isocalendar()[1],
+            'weekday': check_date.strftime('%a'),
+            'day': check_date.day
+        })
+    
+    calendar_df = pd.DataFrame(calendar_data)
+    
+    # Create calendar visualization
+    if not calendar_df.empty:
+        calendar_fig = px.scatter(
+            calendar_df,
+            x='weekday',
+            y='week',
+            size='minutes',
+            color='minutes',
+            hover_data=['date', 'pomodoros', 'status'],
+            title="Consistency Calendar (Bubble size = minutes worked)",
+            color_continuous_scale="RdYlGn",
+            size_max=20
         )
-        st.plotly_chart(pie_fig, use_container_width=True)
+        calendar_fig.update_layout(height=400)
+        st.plotly_chart(calendar_fig, use_container_width=True)
+        
+        # Consistency legend
+        st.markdown("""
+        **Legend:** 🔥 Perfect (50+ min) | 💪 Good (25-49 min) | ⚡ Started (<25 min) | ❌ Miss (0 min)
+        """)
+    
+    # 3. Enhanced time distribution by category AND task
+    st.subheader("🥧 Time Distribution by Category & Tasks")
+    if not df_work.empty:
+        # Category distribution
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            category_time = df_work.groupby('category')['duration'].sum().reset_index()
+            cat_pie_fig = px.pie(
+                category_time, 
+                values='duration', 
+                names='category',
+                title="Time by Category"
+            )
+            st.plotly_chart(cat_pie_fig, use_container_width=True)
+        
+        with col2:
+            # Combined category + task distribution
+            df_work['category_task'] = df_work['category'] + ' → ' + df_work['task']
+            task_time = df_work.groupby('category_task')['duration'].sum().sort_values(ascending=False).head(10)
+            
+            if not task_time.empty:
+                task_pie_fig = px.pie(
+                    values=task_time.values,
+                    names=task_time.index,
+                    title="Top 10 Category → Task Combinations"
+                )
+                st.plotly_chart(task_pie_fig, use_container_width=True)
+        
+        # Detailed breakdown table
+        st.subheader("📊 Detailed Time Breakdown")
+        detailed_breakdown = df_work.groupby(['category', 'task']).agg({
+            'duration': ['sum', 'count'],
+            'date': 'nunique'
+        }).round(2)
+        
+        detailed_breakdown.columns = ['Total Minutes', 'Sessions', 'Days Worked']
+        detailed_breakdown = detailed_breakdown.sort_values('Total Minutes', ascending=False)
+        detailed_breakdown['Hours'] = (detailed_breakdown['Total Minutes'] / 60).round(1)
+        
+        st.dataframe(detailed_breakdown, use_container_width=True)
     
     # 3. Performance trends
     st.subheader("📊 Performance Trends (Last 30 Days)")
-    last_30_days = df_work[df_work['date'] >= (datetime.now(IST) - timedelta(days=30))]
+    cutoff_date = datetime.now(IST).date() - timedelta(days=30)
+    last_30_days = df_work[df_work['date'].dt.date >= cutoff_date]
     
     if not last_30_days.empty:
         trend_data = last_30_days.groupby(last_30_days['date'].dt.date).agg({
