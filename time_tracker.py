@@ -229,6 +229,128 @@ def render_timer():
         st.session_state.category = ""
         return True
 
+# === DAILY TARGET PLANNER ===
+def save_daily_target(target, user):
+    """Save user's daily target to database"""
+    today = datetime.now(IST).date().isoformat()
+    target_doc = {
+        "type": "DailyTarget",
+        "date": today,
+        "target": target,
+        "user": user,
+        "created_at": datetime.utcnow()
+    }
+    collection.update_one(
+        {"type": "DailyTarget", "date": today, "user": user},
+        {"$set": target_doc},
+        upsert=True
+    )
+
+def get_daily_target(user):
+    """Get user's daily target for today"""
+    today = datetime.now(IST).date().isoformat()
+    target_doc = collection.find_one({
+        "type": "DailyTarget", 
+        "date": today, 
+        "user": user
+    })
+    return target_doc["target"] if target_doc else None
+
+def render_daily_target_planner(df, today_progress):
+    """Render daily target planning interface"""
+    st.markdown("## 🎯 Daily Target Planner")
+    
+    # Get existing target or adaptive suggestion
+    current_target = get_daily_target(st.session_state.user)
+    
+    if df.empty:
+        active_days = 0
+        suggested_target, phase_name, phase_desc = 1, "🌱 Building", "Start small - consistency over intensity"
+    else:
+        active_days = len(df[df["pomodoro_type"] == "Work"].groupby(df["date"].dt.date).size())
+        suggested_target, phase_name, phase_desc = get_adaptive_goal(active_days)
+
+    col1, col2 = st.columns([2, 3])
+    
+    with col1:
+        # Target setting interface
+        st.markdown("### 📋 Set Your Target")
+        
+        # Show current target or let user set one
+        if current_target:
+            st.info(f"✅ Today's target: **{current_target} Pomodoros**")
+            
+            # Option to change target
+            with st.expander("🔄 Change Today's Target"):
+                new_target = st.number_input(
+                    "New target", 
+                    min_value=1, 
+                    max_value=12, 
+                    value=current_target,
+                    key="change_target"
+                )
+                if st.button("💾 Update Target", key="update_target_btn"):
+                    save_daily_target(new_target, st.session_state.user)
+                    st.success("🎯 Target updated!")
+                    st.rerun()
+        else:
+            st.markdown(f"💡 **Suggested:** {suggested_target} Pomodoros ({phase_name})")
+            target_input = st.number_input(
+                "How many Pomodoros today?", 
+                min_value=1, 
+                max_value=12, 
+                value=suggested_target,
+                key="daily_target_input"
+            )
+            
+            if st.button("🎯 Set Daily Target", key="set_target_btn", use_container_width=True):
+                save_daily_target(target_input, st.session_state.user)
+                st.success("✅ Daily target set!")
+                st.rerun()
+
+    with col2:
+        # Progress tracking
+        st.markdown("### 📊 Progress Tracking")
+        
+        if current_target:
+            # Progress metrics
+            target = current_target
+            remaining = max(0, target - today_progress)
+            progress_pct = min(100, (today_progress / target) * 100)
+            
+            # Visual progress
+            col_a, col_b, col_c = st.columns(3)
+            
+            with col_a:
+                st.metric("🎯 Target", target)
+            with col_b:
+                st.metric("✅ Complete", today_progress)
+            with col_c:
+                st.metric("⏳ Remaining", remaining)
+            
+            # Progress bar
+            st.progress(progress_pct / 100, text=f"{progress_pct:.0f}% complete")
+            
+            # Status messages
+            if today_progress >= target:
+                st.success("🎉 **Daily target achieved!** Amazing work!")
+                if today_progress > target:
+                    bonus = today_progress - target
+                    st.balloons()
+                    st.info(f"🚀 **Bonus:** +{bonus} extra session{'s' if bonus != 1 else ''}!")
+            elif remaining == 1:
+                st.warning("🔥 **One more to go!** You're almost there!")
+            else:
+                st.info(f"💪 **{remaining} sessions remaining** - you've got this!")
+                
+            # Motivational message
+            if today_progress > 0:
+                st.markdown("---")
+                st.markdown("### 🧠 Freedom to Focus")
+                st.info("🎯 **Work on whatever feels right!** Your goal is simply to complete your daily target of focused work.")
+        else:
+            st.info("👆 Set your daily target to start tracking progress")
+
 # === DAILY GOAL COMPONENT ===
 def render_daily_goal(df):
     """Render daily goal progress section"""
@@ -245,33 +367,7 @@ def render_daily_goal(df):
         today_minutes = work_today['duration'].sum()
         adaptive_goal, phase_name, phase_desc = get_adaptive_goal(active_days)
 
-    # Header
-    st.markdown("## 🎯 Today's Goal")
-
-    # Metrics
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric("📈 Phase", phase_name)
-    with col2:
-        st.metric("🎯 Progress", f"{today_progress}/{adaptive_goal}")
-    with col3:
-        st.metric("⏱️ Minutes Today", today_minutes)
-    with col4:
-        st.metric("📅 Active Days", active_days)
-
-    # Progress visualization
-    progress_pct = min(100, (today_progress / adaptive_goal) * 100)
-    st.progress(progress_pct / 100, text=f"{progress_pct:.0f}% complete - {phase_desc}")
-
-    # Status message
-    if today_progress >= adaptive_goal:
-        st.success("🎉 Daily goal achieved! Great work!")
-    else:
-        remaining = adaptive_goal - today_progress
-        st.info(f"🎯 {remaining} more session{'s' if remaining != 1 else ''} to reach today's goal")
-
-    return today_progress, adaptive_goal
+    return today_progress, adaptive_goal, today_minutes
 
 # === QUICK START COMPONENT ===
 def render_quick_start():
@@ -349,8 +445,11 @@ def render_focus_timer_page():
     if render_timer():
         return
     
-    # Daily goal section
-    today_progress, adaptive_goal = render_daily_goal(df)
+    # Get today's progress
+    today_progress, adaptive_goal, today_minutes = render_daily_goal(df)
+    
+    # Daily Target Planner (main feature)
+    render_daily_target_planner(df, today_progress)
     st.divider()
     
     # Quick start section
@@ -369,17 +468,25 @@ def render_focus_timer_page():
         with col1:
             st.metric("🎯 Work Sessions", today_progress)
         with col2:
-            today_minutes = today_data[today_data["pomodoro_type"] == "Work"]['duration'].sum()
             st.metric("⏱️ Focus Minutes", today_minutes)
         with col3:
             breaks_today = len(today_data[today_data["pomodoro_type"] == "Break"])
             st.metric("☕ Breaks Taken", breaks_today)
         with col4:
-            if today_progress >= adaptive_goal:
-                st.metric("✅ Goal Status", "Achieved!")
+            # Show target vs adaptive goal
+            current_target = get_daily_target(st.session_state.user)
+            if current_target:
+                if today_progress >= current_target:
+                    st.metric("✅ Target Status", "Achieved!")
+                else:
+                    remaining = current_target - today_progress
+                    st.metric("🎯 Target Left", remaining)
             else:
-                remaining = adaptive_goal - today_progress
-                st.metric("🎯 Sessions Left", remaining)
+                if today_progress >= adaptive_goal:
+                    st.metric("✅ Goal Status", "Achieved!")
+                else:
+                    remaining = adaptive_goal - today_progress
+                    st.metric("🎯 Sessions Left", remaining)
 
 def render_analytics_page():
     """Render analytics dashboard"""
