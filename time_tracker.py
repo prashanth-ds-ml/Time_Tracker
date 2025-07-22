@@ -318,38 +318,141 @@ def render_daily_target_planner(df, today_progress):
             remaining = max(0, target - today_progress)
             progress_pct = min(100, (today_progress / target) * 100)
             
-            # Visual progress
+            # Enhanced circular progress visualization
+            st.markdown("#### 🎯 Today's Journey")
+            
+            # Create circular progress indicator using HTML/CSS
+            circle_color = "#10b981" if today_progress >= target else "#3b82f6" if progress_pct >= 50 else "#f59e0b"
+            
+            circular_progress_html = f"""
+            <div style="text-align: center; margin: 20px 0;">
+                <div style="position: relative; display: inline-block;">
+                    <svg width="150" height="150" style="transform: rotate(-90deg);">
+                        <circle cx="75" cy="75" r="65" stroke="#e5e7eb" stroke-width="8" fill="none"/>
+                        <circle cx="75" cy="75" r="65" stroke="{circle_color}" stroke-width="8" fill="none"
+                                stroke-dasharray="408.4" stroke-dashoffset="{408.4 * (1 - progress_pct/100)}"
+                                style="transition: stroke-dashoffset 0.5s ease-in-out;"/>
+                    </svg>
+                    <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);">
+                        <div style="font-size: 2rem; font-weight: bold; color: {circle_color};">{today_progress}</div>
+                        <div style="font-size: 0.8rem; color: #6b7280;">of {target}</div>
+                    </div>
+                </div>
+            </div>
+            """
+            st.markdown(circular_progress_html, unsafe_allow_html=True)
+            
+            # Enhanced metrics with color coding
             col_a, col_b, col_c = st.columns(3)
             
             with col_a:
-                st.metric("🎯 Target", target)
+                if today_progress >= target:
+                    st.success("🎯 **Target**")
+                    st.markdown(f"<h3 style='color: #10b981; margin: 0;'>{target}</h3>", unsafe_allow_html=True)
+                else:
+                    st.info("🎯 **Target**")
+                    st.markdown(f"<h3 style='color: #3b82f6; margin: 0;'>{target}</h3>", unsafe_allow_html=True)
+                    
             with col_b:
-                st.metric("✅ Complete", today_progress)
+                if today_progress >= target:
+                    st.success("✅ **Complete**")
+                    st.markdown(f"<h3 style='color: #10b981; margin: 0;'>{today_progress}</h3>", unsafe_allow_html=True)
+                elif today_progress > 0:
+                    st.info("⚡ **Progress**")
+                    st.markdown(f"<h3 style='color: #3b82f6; margin: 0;'>{today_progress}</h3>", unsafe_allow_html=True)
+                else:
+                    st.warning("🚀 **Start**")
+                    st.markdown(f"<h3 style='color: #f59e0b; margin: 0;'>{today_progress}</h3>", unsafe_allow_html=True)
+                    
             with col_c:
-                st.metric("⏳ Remaining", remaining)
+                if remaining == 0:
+                    st.success("🏆 **Bonus Zone**")
+                    bonus = today_progress - target
+                    st.markdown(f"<h3 style='color: #10b981; margin: 0;'>+{bonus}</h3>", unsafe_allow_html=True)
+                elif remaining == 1:
+                    st.warning("🔥 **Final Push**")
+                    st.markdown(f"<h3 style='color: #f59e0b; margin: 0;'>{remaining}</h3>", unsafe_allow_html=True)
+                else:
+                    st.info("⏳ **Remaining**")
+                    st.markdown(f"<h3 style='color: #3b82f6; margin: 0;'>{remaining}</h3>", unsafe_allow_html=True)
             
-            # Progress bar
-            st.progress(progress_pct / 100, text=f"{progress_pct:.0f}% complete")
-            
-            # Status messages
+            # Enhanced progress bar with percentage
+            progress_text = f"🎯 {progress_pct:.0f}% Complete"
             if today_progress >= target:
-                st.success("🎉 **Daily target achieved!** Amazing work!")
+                st.progress(1.0, text="🎉 Target Achieved!")
+            else:
+                st.progress(progress_pct / 100, text=progress_text)
+            
+            # Enhanced status messages with better visual hierarchy
+            st.markdown("---")
+            
+            if today_progress >= target:
+                st.success("🎉 **DAILY TARGET ACHIEVED!** 🎉")
+                st.markdown("### ✨ Outstanding work today!")
                 if today_progress > target:
                     bonus = today_progress - target
                     st.balloons()
-                    st.info(f"🚀 **Bonus:** +{bonus} extra session{'s' if bonus != 1 else ''}!")
+                    st.markdown(f"""
+                    <div style="background: linear-gradient(90deg, #10b981, #059669); color: white; padding: 15px; border-radius: 10px; text-align: center; margin: 10px 0;">
+                        <h4 style="margin: 0; color: white;">🚀 BONUS ACHIEVEMENT 🚀</h4>
+                        <p style="margin: 5px 0 0 0; color: white;">+{bonus} extra session{'s' if bonus != 1 else ''}! You're on fire!</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
             elif remaining == 1:
-                st.warning("🔥 **One more to go!** You're almost there!")
-            else:
-                st.info(f"💪 **{remaining} sessions remaining** - you've got this!")
+                st.markdown(f"""
+                <div style="background: linear-gradient(90deg, #f59e0b, #d97706); color: white; padding: 15px; border-radius: 10px; text-align: center; margin: 10px 0;">
+                    <h4 style="margin: 0; color: white;">🔥 FINAL STRETCH! 🔥</h4>
+                    <p style="margin: 5px 0 0 0; color: white;">Just one more session to hit your target!</p>
+                </div>
+                """, unsafe_allow_html=True)
                 
-            # Motivational message
+            elif remaining > 1:
+                motivation_messages = [
+                    "You've got this! 💪",
+                    "Stay focused! 🎯", 
+                    "Every session counts! ⚡",
+                    "Progress in action! 🚀"
+                ]
+                import random
+                message = random.choice(motivation_messages)
+                
+                st.markdown(f"""
+                <div style="background: linear-gradient(90deg, #3b82f6, #2563eb); color: white; padding: 15px; border-radius: 10px; text-align: center; margin: 10px 0;">
+                    <h4 style="margin: 0; color: white;">💪 KEEP GOING!</h4>
+                    <p style="margin: 5px 0 0 0; color: white;">{remaining} sessions remaining - {message}</p>
+                </div>
+                """, unsafe_allow_html=True)
+                
+            else:  # remaining == 0 and today_progress == target
+                st.markdown(f"""
+                <div style="background: linear-gradient(90deg, #10b981, #059669); color: white; padding: 15px; border-radius: 10px; text-align: center; margin: 10px 0;">
+                    <h4 style="margin: 0; color: white;">🎯 PERFECT HIT!</h4>
+                    <p style="margin: 5px 0 0 0; color: white;">Target achieved exactly! Master of focus!</p>
+                </div>
+                """, unsafe_allow_html=True)
+                
+            # Enhanced freedom message
             if today_progress > 0:
                 st.markdown("---")
                 st.markdown("### 🧠 Freedom to Focus")
-                st.info("🎯 **Work on whatever feels right!** Your goal is simply to complete your daily target of focused work.")
+                st.markdown(f"""
+                <div style="background: #f8fafc; border-left: 4px solid #3b82f6; padding: 15px; margin: 10px 0; border-radius: 0 8px 8px 0;">
+                    <p style="margin: 0; color: #475569;">
+                        <strong>🎯 Work on whatever feels right!</strong><br>
+                        Your goal is simply to complete <strong>{remaining} more session{'s' if remaining != 1 else ''}</strong> of focused work. 
+                        Follow your energy and intuition!
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
         else:
-            st.info("👆 Set your daily target to start tracking progress")
+            # Enhanced call-to-action for setting target
+            st.markdown(f"""
+            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 12px; text-align: center; margin: 10px 0;">
+                <h4 style="margin: 0 0 10px 0; color: white;">🎯 Ready to Focus?</h4>
+                <p style="margin: 0; color: white;">Set your daily target to unlock enhanced progress tracking!</p>
+            </div>
+            """, unsafe_allow_html=True)
 
 # === DAILY GOAL COMPONENT ===
 def render_daily_goal(df):
@@ -455,38 +558,110 @@ def render_focus_timer_page():
     # Quick start section
     render_quick_start()
     
-    # Today's summary
+    # Enhanced Today's summary
     if not df.empty:
         st.divider()
         st.subheader("📊 Today's Summary")
         
         today = datetime.now(IST).date()
         today_data = df[df["date"].dt.date == today]
+        breaks_today = len(today_data[today_data["pomodoro_type"] == "Break"])
         
+        # Enhanced metrics with visual indicators
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.metric("🎯 Work Sessions", today_progress)
-        with col2:
-            st.metric("⏱️ Focus Minutes", today_minutes)
-        with col3:
-            breaks_today = len(today_data[today_data["pomodoro_type"] == "Break"])
-            st.metric("☕ Breaks Taken", breaks_today)
-        with col4:
-            # Show target vs adaptive goal
+            # Work sessions with progress indicator
             current_target = get_daily_target(st.session_state.user)
+            target_val = current_target if current_target else adaptive_goal
+            
+            if today_progress >= target_val:
+                st.success("🎯 Work Sessions")
+                st.markdown(f"<h2 style='color: #10b981; margin: 0;'>{today_progress}</h2>", unsafe_allow_html=True)
+                st.markdown("✅ Target hit!")
+            elif today_progress > 0:
+                st.info("🎯 Work Sessions") 
+                st.markdown(f"<h2 style='color: #3b82f6; margin: 0;'>{today_progress}</h2>", unsafe_allow_html=True)
+                remaining = target_val - today_progress
+                st.markdown(f"🔥 {remaining} to go!")
+            else:
+                st.warning("🎯 Work Sessions")
+                st.markdown(f"<h2 style='color: #f59e0b; margin: 0;'>{today_progress}</h2>", unsafe_allow_html=True)
+                st.markdown("🚀 Let's start!")
+                
+        with col2:
+            # Focus minutes with time indicator
+            hours = today_minutes // 60
+            mins = today_minutes % 60
+            
+            if today_minutes >= 120:  # 2+ hours
+                st.success("⏱️ Focus Time")
+                if hours > 0:
+                    st.markdown(f"<h2 style='color: #10b981; margin: 0;'>{hours}h {mins}m</h2>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"<h2 style='color: #10b981; margin: 0;'>{mins}m</h2>", unsafe_allow_html=True)
+                st.markdown("🔥 Deep work!")
+            elif today_minutes >= 25:
+                st.info("⏱️ Focus Time")
+                if hours > 0:
+                    st.markdown(f"<h2 style='color: #3b82f6; margin: 0;'>{hours}h {mins}m</h2>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"<h2 style='color: #3b82f6; margin: 0;'>{mins}m</h2>", unsafe_allow_html=True)
+                st.markdown("💪 Building up!")
+            else:
+                st.warning("⏱️ Focus Time")
+                st.markdown(f"<h2 style='color: #f59e0b; margin: 0;'>{today_minutes}m</h2>", unsafe_allow_html=True)
+                st.markdown("⚡ Just started!")
+                
+        with col3:
+            # Break balance indicator
+            work_break_ratio = breaks_today / max(1, today_progress)
+            
+            if 0.3 <= work_break_ratio <= 0.7:  # Good balance
+                st.success("☕ Break Balance")
+                st.markdown(f"<h2 style='color: #10b981; margin: 0;'>{breaks_today}</h2>", unsafe_allow_html=True)
+                st.markdown("⚖️ Well balanced!")
+            elif work_break_ratio > 0.7:  # Too many breaks
+                st.warning("☕ Break Balance")
+                st.markdown(f"<h2 style='color: #f59e0b; margin: 0;'>{breaks_today}</h2>", unsafe_allow_html=True)
+                st.markdown("🎯 More focus!")
+            else:  # Too few breaks
+                st.info("☕ Break Balance")
+                st.markdown(f"<h2 style='color: #3b82f6; margin: 0;'>{breaks_today}</h2>", unsafe_allow_html=True)
+                st.markdown("🧘 Take breaks!")
+                
+        with col4:
+            # Enhanced target status
+            current_target = get_daily_target(st.session_state.user)
+            
             if current_target:
                 if today_progress >= current_target:
-                    st.metric("✅ Target Status", "Achieved!")
+                    if today_progress > current_target:
+                        st.success("🚀 Bonus Zone")
+                        bonus = today_progress - current_target
+                        st.markdown(f"<h2 style='color: #10b981; margin: 0;'>+{bonus}</h2>", unsafe_allow_html=True)
+                        st.markdown("🌟 Exceeding!")
+                    else:
+                        st.success("✅ Target Hit")
+                        st.markdown(f"<h2 style='color: #10b981; margin: 0;'>100%</h2>", unsafe_allow_html=True)
+                        st.markdown("🎯 Perfect!")
                 else:
                     remaining = current_target - today_progress
-                    st.metric("🎯 Target Left", remaining)
+                    progress_pct = (today_progress / current_target) * 100
+                    st.info("🎯 Progress")
+                    st.markdown(f"<h2 style='color: #3b82f6; margin: 0;'>{progress_pct:.0f}%</h2>", unsafe_allow_html=True)
+                    st.markdown(f"⏳ {remaining} left!")
             else:
                 if today_progress >= adaptive_goal:
-                    st.metric("✅ Goal Status", "Achieved!")
+                    st.success("✅ Goal Hit")
+                    st.markdown(f"<h2 style='color: #10b981; margin: 0;'>100%</h2>", unsafe_allow_html=True)
+                    st.markdown("🎉 Adaptive goal!")
                 else:
                     remaining = adaptive_goal - today_progress
-                    st.metric("🎯 Sessions Left", remaining)
+                    progress_pct = (today_progress / adaptive_goal) * 100 if adaptive_goal > 0 else 0
+                    st.info("🎯 Progress")
+                    st.markdown(f"<h2 style='color: #3b82f6; margin: 0;'>{progress_pct:.0f}%</h2>", unsafe_allow_html=True)
+                    st.markdown(f"⏳ {remaining} left!")
 
 def render_analytics_page():
     """Render analytics dashboard"""
