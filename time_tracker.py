@@ -1157,28 +1157,267 @@ def render_analytics_page():
             </div>
             """, unsafe_allow_html=True)
         
-        # Recent activity pattern
+        # Enhanced Recent Patterns Analysis
         if len(filtered_work) >= 7:
-            st.markdown("#### 📈 Recent Patterns")
+            st.markdown("#### 📈 Recent Patterns & Trends")
+            
+            # Calculate pattern metrics
             recent_days = filtered_work.groupby(filtered_work['date'].dt.date)['category'].nunique()
             avg_categories_per_day = recent_days.mean()
             
-            if avg_categories_per_day >= 2.5:
-                pattern_msg = "🌟 High variety - exploring many areas"
-                pattern_color = "#10b981"
-            elif avg_categories_per_day >= 1.5:
-                pattern_msg = "⚖️ Moderate variety - balanced approach"
-                pattern_color = "#3b82f6"
-            else:
-                pattern_msg = "🎯 Single focus - deep concentration"
-                pattern_color = "#f59e0b"
+            # Time allocation patterns
+            recent_category_time = filtered_work.groupby('category')['duration'].sum()
+            recent_total_time = recent_category_time.sum()
             
-            st.markdown(f"""
-            <div style="background: #f8fafc; border-left: 4px solid {pattern_color}; padding: 12px; margin: 8px 0; border-radius: 4px;">
-                <strong>{pattern_msg}</strong><br>
-                Avg <strong>{avg_categories_per_day:.1f}</strong> categories per day
-            </div>
-            """, unsafe_allow_html=True)
+            # Compare with earlier period if enough data
+            if time_filter == "Last 30 days" and len(filtered_work) >= 14:
+                # Split into recent vs earlier halves
+                mid_date = today - timedelta(days=15)
+                earlier_work = filtered_work[filtered_work['date'].dt.date < mid_date]
+                recent_work = filtered_work[filtered_work['date'].dt.date >= mid_date]
+                
+                if len(earlier_work) > 0 and len(recent_work) > 0:
+                    # Calculate percentage changes
+                    earlier_cat_time = earlier_work.groupby('category')['duration'].sum()
+                    recent_cat_time = recent_work.groupby('category')['duration'].sum()
+                    
+                    earlier_total = earlier_cat_time.sum()
+                    recent_total = recent_cat_time.sum()
+                    
+                    # Pattern insights with percentage changes
+                    pattern_changes = []
+                    all_categories = set(earlier_cat_time.index) | set(recent_cat_time.index)
+                    
+                    for cat in all_categories:
+                        earlier_pct = (earlier_cat_time.get(cat, 0) / earlier_total * 100) if earlier_total > 0 else 0
+                        recent_pct = (recent_cat_time.get(cat, 0) / recent_total * 100) if recent_total > 0 else 0
+                        change_pct = recent_pct - earlier_pct
+                        
+                        if abs(change_pct) >= 5:  # Significant change threshold
+                            pattern_changes.append({
+                                'category': cat,
+                                'change': change_pct,
+                                'recent_pct': recent_pct,
+                                'earlier_pct': earlier_pct
+                            })
+                    
+                    # Sort by absolute change magnitude
+                    pattern_changes.sort(key=lambda x: abs(x['change']), reverse=True)
+                    
+                    # Display pattern changes
+                    if pattern_changes:
+                        st.markdown("##### 📊 Time Allocation Shifts (Last 15 vs Previous 15 days)")
+                        
+                        for i, change in enumerate(pattern_changes[:3]):  # Show top 3 changes
+                            cat = change['category']
+                            change_val = change['change']
+                            recent_pct = change['recent_pct']
+                            earlier_pct = change['earlier_pct']
+                            
+                            if change_val > 0:
+                                trend_icon = "📈"
+                                trend_color = "#059669"
+                                trend_desc = "INCREASING"
+                                change_text = f"+{change_val:.1f}%"
+                            else:
+                                trend_icon = "📉"
+                                trend_color = "#dc2626"
+                                trend_desc = "DECREASING"
+                                change_text = f"{change_val:.1f}%"
+                            
+                            st.markdown(f"""
+                            <div style="background: #f8fafc; border: 1px solid {trend_color}; border-radius: 6px; padding: 12px; margin: 6px 0;">
+                                <div style="display: flex; justify-content: space-between; align-items: center;">
+                                    <div style="font-weight: bold; color: #1f2937; font-size: 0.95em;">
+                                        {trend_icon} {cat}
+                                    </div>
+                                    <div style="font-weight: bold; color: {trend_color}; font-size: 0.9em;">
+                                        {trend_desc}
+                                    </div>
+                                </div>
+                                <div style="margin: 8px 0;">
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                                        <span style="font-size: 0.85em; color: #6b7280;">Previous 15 days:</span>
+                                        <span style="font-weight: bold; color: #374151;">{earlier_pct:.1f}%</span>
+                                    </div>
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                                        <span style="font-size: 0.85em; color: #6b7280;">Recent 15 days:</span>
+                                        <span style="font-weight: bold; color: #374151;">{recent_pct:.1f}%</span>
+                                    </div>
+                                    <div style="background: {trend_color}; color: white; text-align: center; padding: 4px 8px; border-radius: 4px; font-size: 0.85em; font-weight: bold;">
+                                        {change_text} change in time allocation
+                                    </div>
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                    
+                    # Overall pattern assessment
+                    total_change = sum(abs(c['change']) for c in pattern_changes)
+                    if total_change >= 20:
+                        pattern_stability = "🌪️ DYNAMIC"
+                        stability_color = "#dc2626"
+                        stability_desc = "Significant shifts in focus areas"
+                    elif total_change >= 10:
+                        pattern_stability = "⚡ EVOLVING"
+                        stability_color = "#f59e0b"
+                        stability_desc = "Moderate changes in priorities"
+                    else:
+                        pattern_stability = "🎯 STABLE"
+                        stability_color = "#059669"
+                        stability_desc = "Consistent focus patterns"
+                    
+                    st.markdown(f"""
+                    <div style="background: linear-gradient(90deg, rgba(59, 130, 246, 0.1), rgba(99, 102, 241, 0.1)); 
+                                border: 1px solid {stability_color}; border-radius: 6px; padding: 12px; text-align: center; margin: 12px 0;">
+                        <div style="font-weight: bold; color: {stability_color}; font-size: 0.95em;">
+                            PATTERN STATUS: {pattern_stability}
+                        </div>
+                        <div style="font-size: 0.8em; color: #6b7280; margin-top: 4px;">
+                            {stability_desc}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            
+            # Daily focus diversity analysis
+            st.markdown("##### 🎯 Daily Focus Diversity")
+            
+            diversity_scores = []
+            for i in range(min(14, len(filtered_work.groupby(filtered_work['date'].dt.date)))):
+                check_date = today - timedelta(days=i)
+                day_data = filtered_work[filtered_work['date'].dt.date == check_date]
+                if len(day_data) > 0:
+                    categories_count = day_data['category'].nunique()
+                    sessions_count = len(day_data)
+                    diversity_score = min(100, (categories_count / max(1, sessions_count)) * 100)
+                    diversity_scores.append({
+                        'date': check_date.strftime('%m/%d'),
+                        'diversity': diversity_score,
+                        'categories': categories_count,
+                        'sessions': sessions_count
+                    })
+            
+            if diversity_scores:
+                # Recent diversity trend
+                recent_avg_diversity = sum(d['diversity'] for d in diversity_scores[:7]) / min(7, len(diversity_scores))
+                earlier_avg_diversity = sum(d['diversity'] for d in diversity_scores[7:]) / max(1, len(diversity_scores[7:]))
+                
+                diversity_trend = recent_avg_diversity - earlier_avg_diversity
+                
+                col_div1, col_div2, col_div3 = st.columns(3)
+                
+                with col_div1:
+                    if recent_avg_diversity >= 60:
+                        div_status = "🌟 HIGH"
+                        div_color = "#059669"
+                    elif recent_avg_diversity >= 30:
+                        div_status = "⚖️ MODERATE"
+                        div_color = "#3b82f6"
+                    else:
+                        div_status = "🎯 FOCUSED"
+                        div_color = "#f59e0b"
+                    
+                    st.markdown(f"""
+                    <div style="background: #f8fafc; border: 1px solid {div_color}; border-radius: 6px; padding: 12px; text-align: center;">
+                        <div style="font-weight: bold; color: {div_color}; font-size: 0.9em;">{div_status}</div>
+                        <div style="font-size: 1.5em; font-weight: bold; color: #1f2937; margin: 4px 0;">{recent_avg_diversity:.0f}%</div>
+                        <div style="font-size: 0.75em; color: #6b7280;">Focus Diversity</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col_div2:
+                    if abs(diversity_trend) < 5:
+                        trend_status = "➡️ STABLE"
+                        trend_color = "#6b7280"
+                    elif diversity_trend > 0:
+                        trend_status = "📈 EXPANDING"
+                        trend_color = "#059669"
+                    else:
+                        trend_status = "📉 NARROWING"
+                        trend_color = "#dc2626"
+                    
+                    st.markdown(f"""
+                    <div style="background: #f8fafc; border: 1px solid {trend_color}; border-radius: 6px; padding: 12px; text-align: center;">
+                        <div style="font-weight: bold; color: {trend_color}; font-size: 0.9em;">{trend_status}</div>
+                        <div style="font-size: 1.5em; font-weight: bold; color: #1f2937; margin: 4px 0;">
+                            {diversity_trend:+.0f}%
+                        </div>
+                        <div style="font-size: 0.75em; color: #6b7280;">Trend (7d)</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col_div3:
+                    avg_cats_recent = sum(d['categories'] for d in diversity_scores[:7]) / min(7, len(diversity_scores))
+                    
+                    if avg_cats_recent >= 3:
+                        cats_status = "🌈 VARIED"
+                        cats_color = "#8b5cf6"
+                    elif avg_cats_recent >= 2:
+                        cats_status = "⚖️ BALANCED"
+                        cats_color = "#3b82f6"
+                    else:
+                        cats_status = "🎯 SINGULAR"
+                        cats_color = "#f59e0b"
+                    
+                    st.markdown(f"""
+                    <div style="background: #f8fafc; border: 1px solid {cats_color}; border-radius: 6px; padding: 12px; text-align: center;">
+                        <div style="font-weight: bold; color: {cats_color}; font-size: 0.9em;">{cats_status}</div>
+                        <div style="font-size: 1.5em; font-weight: bold; color: #1f2937; margin: 4px 0;">{avg_cats_recent:.1f}</div>
+                        <div style="font-size: 0.75em; color: #6b7280;">Avg Categories/Day</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            
+            # Session timing patterns
+            st.markdown("##### ⏰ Session Timing Patterns")
+            
+            # Add hour analysis
+            filtered_work['hour'] = pd.to_datetime(filtered_work['time'], format='%I:%M %p', errors='coerce').dt.hour
+            hourly_sessions = filtered_work.groupby('hour').size()
+            
+            if len(hourly_sessions) > 0:
+                peak_hours = hourly_sessions.nlargest(3)
+                
+                # Convert hours to readable format
+                peak_times = []
+                for hour, count in peak_hours.items():
+                    if pd.notna(hour):
+                        time_str = f"{int(hour):02d}:00"
+                        if hour < 12:
+                            time_str += " AM"
+                        elif hour == 12:
+                            time_str += " PM"
+                        else:
+                            time_str = f"{int(hour-12):02d}:00 PM"
+                        peak_times.append((time_str, count))
+                
+                if peak_times:
+                    # Determine productivity pattern
+                    if any(hour < 12 for hour, _ in peak_hours.items() if pd.notna(hour)):
+                        if any(hour >= 12 for hour, _ in peak_hours.items() if pd.notna(hour)):
+                            timing_pattern = "🌅🌆 ALL-DAY WARRIOR"
+                            timing_color = "#8b5cf6"
+                            timing_desc = "Productive throughout the day"
+                        else:
+                            timing_pattern = "🌅 EARLY BIRD"
+                            timing_color = "#f59e0b"
+                            timing_desc = "Morning productivity focus"
+                    else:
+                        timing_pattern = "🌙 NIGHT OWL"
+                        timing_color = "#3b82f6"
+                        timing_desc = "Afternoon/evening focus"
+                    
+                    st.markdown(f"""
+                    <div style="background: #f8fafc; border-left: 4px solid {timing_color}; padding: 12px; margin: 8px 0; border-radius: 0 6px 6px 0;">
+                        <div style="font-weight: bold; color: {timing_color}; margin-bottom: 8px;">
+                            {timing_pattern}
+                        </div>
+                        <div style="font-size: 0.9em; color: #374151; margin-bottom: 8px;">
+                            {timing_desc}
+                        </div>
+                        <div style="font-size: 0.85em; color: #6b7280;">
+                            <strong>Peak focus times:</strong> {', '.join([f"{time} ({count} sessions)" for time, count in peak_times[:2]])}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
     
     # Weekly trend analysis
     if time_filter != "Last 7 days" and len(filtered_work) > 7:
