@@ -717,28 +717,333 @@ def render_analytics_page():
         fig.update_layout(height=400, showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
 
-    # Category and task breakdowns
-    col1, col2 = st.columns(2)
-
+    # Enhanced Category and Task Analysis
+    st.divider()
+    st.subheader("🎯 Time Investment Analysis")
+    
+    # Time period filter
+    col_filter1, col_filter2, col_filter3 = st.columns(3)
+    with col_filter1:
+        time_filter = st.selectbox("📅 Time Period", 
+                                 ["Last 7 days", "Last 30 days", "All time"], 
+                                 index=1, key="time_filter_analytics")
+    
+    # Filter data based on selection
+    if time_filter == "Last 7 days":
+        cutoff_date = today - timedelta(days=7)
+        filtered_work = df_work[df_work["date"].dt.date >= cutoff_date]
+    elif time_filter == "Last 30 days":
+        cutoff_date = today - timedelta(days=30)
+        filtered_work = df_work[df_work["date"].dt.date >= cutoff_date]
+    else:
+        filtered_work = df_work
+    
+    if filtered_work.empty:
+        st.info(f"📊 No data available for {time_filter.lower()}")
+        return
+    
+    # Enhanced Category Analysis
+    st.markdown("### 📂 Category Deep Dive")
+    
+    category_stats = filtered_work.groupby('category').agg({
+        'duration': ['sum', 'count', 'mean']
+    }).round(1)
+    category_stats.columns = ['total_minutes', 'sessions', 'avg_session']
+    category_stats = category_stats.sort_values('total_minutes', ascending=False)
+    
+    # Category overview metrics
+    col1, col2 = st.columns([3, 2])
+    
     with col1:
-        st.subheader("📂 Category Breakdown")
-        category_data = df_work.groupby('category')['duration'].sum().sort_values(ascending=False)
-
-        if len(category_data) > 0:
-            fig = px.pie(values=category_data.values, names=category_data.index,
-                       title="Time by Category")
-            fig.update_layout(height=350)
-            st.plotly_chart(fig, use_container_width=True)
-
+        # Enhanced donut chart with better styling
+        if len(category_stats) > 0:
+            total_time = category_stats['total_minutes'].sum()
+            category_stats['percentage'] = (category_stats['total_minutes'] / total_time * 100).round(1)
+            
+            # Create enhanced donut chart
+            fig_donut = px.pie(
+                values=category_stats['total_minutes'], 
+                names=category_stats.index,
+                title=f"📊 Time Distribution by Category ({time_filter})",
+                hole=0.4,
+                color_discrete_sequence=px.colors.qualitative.Set3
+            )
+            
+            # Enhanced styling
+            fig_donut.update_traces(
+                textposition='inside', 
+                textinfo='percent+label',
+                hovertemplate='<b>%{label}</b><br>' +
+                             'Time: %{value} minutes<br>' +
+                             'Percentage: %{percent}<br>' +
+                             '<extra></extra>',
+                textfont_size=12
+            )
+            
+            fig_donut.update_layout(
+                height=400,
+                showlegend=True,
+                legend=dict(orientation="v", yanchor="middle", y=0.5, xanchor="left", x=1.05),
+                title_x=0.5,
+                font_size=12
+            )
+            
+            # Add center text showing total time
+            total_hours = total_time // 60
+            total_mins = total_time % 60
+            center_text = f"{total_hours}h {total_mins}m" if total_hours > 0 else f"{total_mins}m"
+            
+            fig_donut.add_annotation(
+                text=f"<b>Total</b><br>{center_text}",
+                x=0.5, y=0.5,
+                font_size=16,
+                showarrow=False
+            )
+            
+            st.plotly_chart(fig_donut, use_container_width=True)
+    
     with col2:
-        st.subheader("🎯 Top Tasks")
-        task_data = df_work.groupby('task')['duration'].sum().sort_values(ascending=False).head(8)
-
-        if len(task_data) > 0:
-            fig = px.bar(x=task_data.values, y=task_data.index, 
-                       orientation='h', title="Top Tasks by Time")
-            fig.update_layout(height=350)
-            st.plotly_chart(fig, use_container_width=True)
+        # Category performance table
+        st.markdown("#### 📈 Category Performance")
+        
+        # Create enhanced metrics table
+        performance_data = []
+        for cat in category_stats.index:
+            total_mins = category_stats.loc[cat, 'total_minutes']
+            sessions = int(category_stats.loc[cat, 'sessions'])
+            avg_session = category_stats.loc[cat, 'avg_session']
+            percentage = category_stats.loc[cat, 'percentage']
+            
+            # Convert to hours if > 60 minutes
+            if total_mins >= 60:
+                hours = int(total_mins // 60)
+                mins = int(total_mins % 60)
+                time_str = f"{hours}h {mins}m" if mins > 0 else f"{hours}h"
+            else:
+                time_str = f"{int(total_mins)}m"
+            
+            performance_data.append({
+                'Category': cat,
+                'Time': time_str,
+                'Sessions': sessions,
+                'Avg/Session': f"{avg_session:.0f}m",
+                '%': f"{percentage:.1f}%"
+            })
+        
+        # Display as styled dataframe
+        perf_df = pd.DataFrame(performance_data)
+        st.dataframe(
+            perf_df, 
+            use_container_width=True,
+            hide_index=True,
+            height=min(len(perf_df) * 35 + 38, 300)
+        )
+        
+        # Top category highlight
+        if len(category_stats) > 0:
+            top_category = category_stats.index[0]
+            top_percentage = category_stats.loc[top_category, 'percentage']
+            
+            if top_percentage > 50:
+                st.success(f"🎯 **{top_category}** dominates your focus ({top_percentage:.0f}%)")
+            elif top_percentage > 30:
+                st.info(f"🎯 **{top_category}** is your main focus ({top_percentage:.0f}%)")
+            else:
+                st.warning("⚖️ Your time is well-distributed across categories")
+    
+    # Enhanced Task Analysis
+    st.markdown("### 🎯 Task Performance Analysis")
+    
+    # Task stats with category context
+    task_stats = filtered_work.groupby(['category', 'task']).agg({
+        'duration': ['sum', 'count', 'mean']
+    }).round(1)
+    task_stats.columns = ['total_minutes', 'sessions', 'avg_session']
+    task_stats = task_stats.reset_index().sort_values('total_minutes', ascending=False)
+    
+    col1, col2 = st.columns([3, 2])
+    
+    with col1:
+        # Enhanced horizontal bar chart for tasks
+        top_tasks = task_stats.head(12)  # Show more tasks
+        
+        if len(top_tasks) > 0:
+            # Create color mapping based on categories
+            category_colors = px.colors.qualitative.Set3
+            color_map = {cat: category_colors[i % len(category_colors)] 
+                        for i, cat in enumerate(top_tasks['category'].unique())}
+            top_tasks['color'] = top_tasks['category'].map(color_map)
+            
+            # Create enhanced horizontal bar chart
+            fig_tasks = px.bar(
+                top_tasks, 
+                x='total_minutes', 
+                y='task',
+                color='category',
+                title=f"🎯 Top Tasks by Time Investment ({time_filter})",
+                color_discrete_sequence=px.colors.qualitative.Set3,
+                hover_data={
+                    'sessions': True,
+                    'avg_session': ':.0f',
+                    'category': False
+                }
+            )
+            
+            # Enhanced styling
+            fig_tasks.update_traces(
+                hovertemplate='<b>%{y}</b><br>' +
+                             'Category: %{color}<br>' +
+                             'Time: %{x} minutes<br>' +
+                             'Sessions: %{customdata[0]}<br>' +
+                             'Avg/Session: %{customdata[1]:.0f}m<br>' +
+                             '<extra></extra>'
+            )
+            
+            fig_tasks.update_layout(
+                height=max(400, len(top_tasks) * 30),
+                yaxis={'categoryorder': 'total ascending'},
+                xaxis_title="Time (minutes)",
+                yaxis_title="Tasks",
+                title_x=0.5,
+                showlegend=True,
+                legend=dict(
+                    title="Category",
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                )
+            )
+            
+            st.plotly_chart(fig_tasks, use_container_width=True)
+    
+    with col2:
+        # Task insights and recommendations
+        st.markdown("#### 💡 Task Insights")
+        
+        if len(task_stats) > 0:
+            # Calculate insights
+            total_tasks = len(task_stats)
+            avg_task_time = task_stats['total_minutes'].mean()
+            top_task = task_stats.iloc[0]
+            
+            # Most productive task
+            st.markdown(f"""
+            <div style="background: #f0f9ff; border-left: 4px solid #3b82f6; padding: 12px; margin: 8px 0; border-radius: 4px;">
+                <strong>🏆 Top Task</strong><br>
+                <strong>{top_task['task']}</strong><br>
+                Category: {top_task['category']}<br>
+                {int(top_task['total_minutes'])}m across {int(top_task['sessions'])} sessions
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Task diversity insight
+            categories_count = task_stats['category'].nunique()
+            if categories_count >= 3:
+                st.markdown(f"""
+                <div style="background: #f0fdf4; border-left: 4px solid #10b981; padding: 12px; margin: 8px 0; border-radius: 4px;">
+                    <strong>🌟 Great Diversity!</strong><br>
+                    Working across <strong>{categories_count} categories</strong><br>
+                    with <strong>{total_tasks} different tasks</strong>
+                </div>
+                """, unsafe_allow_html=True)
+            elif categories_count == 2:
+                st.markdown(f"""
+                <div style="background: #fffbeb; border-left: 4px solid #f59e0b; padding: 12px; margin: 8px 0; border-radius: 4px;">
+                    <strong>⚖️ Balanced Focus</strong><br>
+                    Working across <strong>{categories_count} categories</strong><br>
+                    Consider exploring more areas?
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div style="background: #fef2f2; border-left: 4px solid #ef4444; padding: 12px; margin: 8px 0; border-radius: 4px;">
+                    <strong>🎯 Laser Focus</strong><br>
+                    Concentrating on <strong>1 category</strong><br>
+                    Very focused approach!
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Session efficiency insight
+            efficient_tasks = task_stats[task_stats['avg_session'] >= 20]  # 20+ min sessions
+            if len(efficient_tasks) > 0:
+                efficiency_pct = len(efficient_tasks) / len(task_stats) * 100
+                st.markdown(f"""
+                <div style="background: #f0f9ff; border-left: 4px solid #06b6d4; padding: 12px; margin: 8px 0; border-radius: 4px;">
+                    <strong>⚡ Efficiency Score</strong><br>
+                    <strong>{efficiency_pct:.0f}%</strong> of tasks have<br>
+                    20+ minute sessions (deep work!)
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # Recent activity pattern
+        if len(filtered_work) >= 7:
+            st.markdown("#### 📈 Recent Patterns")
+            recent_days = filtered_work.groupby(filtered_work['date'].dt.date)['category'].nunique()
+            avg_categories_per_day = recent_days.mean()
+            
+            if avg_categories_per_day >= 2.5:
+                pattern_msg = "🌟 High variety - exploring many areas"
+                pattern_color = "#10b981"
+            elif avg_categories_per_day >= 1.5:
+                pattern_msg = "⚖️ Moderate variety - balanced approach"
+                pattern_color = "#3b82f6"
+            else:
+                pattern_msg = "🎯 Single focus - deep concentration"
+                pattern_color = "#f59e0b"
+            
+            st.markdown(f"""
+            <div style="background: #f8fafc; border-left: 4px solid {pattern_color}; padding: 12px; margin: 8px 0; border-radius: 4px;">
+                <strong>{pattern_msg}</strong><br>
+                Avg <strong>{avg_categories_per_day:.1f}</strong> categories per day
+            </div>
+            """, unsafe_allow_html=True)
+    
+    # Weekly trend analysis
+    if time_filter != "Last 7 days" and len(filtered_work) > 7:
+        st.markdown("### 📊 Weekly Category Trends")
+        
+        # Create weekly breakdown
+        filtered_work['week'] = filtered_work['date'].dt.isocalendar().week
+        filtered_work['year_week'] = filtered_work['date'].dt.strftime('%Y-W%U')
+        
+        weekly_categories = filtered_work.groupby(['year_week', 'category'])['duration'].sum().reset_index()
+        
+        if len(weekly_categories) > 0:
+            # Create stacked bar chart for weekly trends
+            fig_weekly = px.bar(
+                weekly_categories, 
+                x='year_week', 
+                y='duration',
+                color='category',
+                title="📈 Weekly Time Distribution by Category",
+                color_discrete_sequence=px.colors.qualitative.Set3
+            )
+            
+            fig_weekly.update_layout(
+                height=350,
+                xaxis_title="Week",
+                yaxis_title="Time (minutes)",
+                title_x=0.5,
+                legend=dict(
+                    title="Category",
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                )
+            )
+            
+            fig_weekly.update_traces(
+                hovertemplate='<b>%{x}</b><br>' +
+                             'Category: %{color}<br>' +
+                             'Time: %{y} minutes<br>' +
+                             '<extra></extra>'
+            )
+            
+            st.plotly_chart(fig_weekly, use_container_width=True)
 
     # Streak information
     st.divider()
