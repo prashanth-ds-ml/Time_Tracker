@@ -1109,8 +1109,9 @@ def render_analytics_page():
                 st.markdown("##### 🔥 Focus Momentum")
                 
                 # Calculate momentum based on recent activity
+                cutoff_datetime = datetime.combine(today - timedelta(days=7), datetime.min.time())
                 recent_7_days = task_stats[task_stats.index.isin(
-                    filtered_work[filtered_work['date'] >= today - timedelta(days=7)].groupby(['category', 'task']).first().index
+                    filtered_work[filtered_work['date'] >= cutoff_datetime].groupby(['category', 'task']).first().index
                 )] if len(filtered_work) > 0 else pd.DataFrame()
                 
                 if len(recent_7_days) > 0:
