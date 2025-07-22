@@ -919,63 +919,242 @@ def render_analytics_page():
             st.plotly_chart(fig_tasks, use_container_width=True)
     
     with col2:
-        # Task insights and recommendations
-        st.markdown("#### 💡 Task Insights")
+        # Enhanced Task insights and recommendations
+        st.markdown("#### 💡 Smart Insights & Recommendations")
         
         if len(task_stats) > 0:
-            # Calculate insights
+            # Calculate advanced insights
             total_tasks = len(task_stats)
             avg_task_time = task_stats['total_minutes'].mean()
             top_task = task_stats.iloc[0]
+            total_time_invested = task_stats['total_minutes'].sum()
             
-            # Most productive task
+            # === TOP PERFORMER INSIGHT ===
+            top_task_pct = (top_task['total_minutes'] / total_time_invested) * 100
+            top_productivity_score = (top_task['sessions'] * top_task['avg_session']) / 60  # Hours of effective work
+            
+            # Dynamic top task analysis
+            if top_task_pct > 40:
+                insight_level = "🔥 DOMINANT"
+                insight_color = "#dc2626"
+                insight_bg = "#fef2f2"
+                recommendation = "Consider balancing with other priorities"
+            elif top_task_pct > 25:
+                insight_level = "🎯 PRIMARY"
+                insight_color = "#3b82f6"
+                insight_bg = "#f0f9ff"
+                recommendation = "Great focus! Maintaining momentum"
+            else:
+                insight_level = "⚖️ BALANCED"
+                insight_color = "#059669"
+                insight_bg = "#f0fdf4"
+                recommendation = "Well-distributed effort across tasks"
+            
             st.markdown(f"""
-            <div style="background: #f0f9ff; border-left: 4px solid #3b82f6; padding: 12px; margin: 8px 0; border-radius: 4px;">
-                <strong>🏆 Top Task</strong><br>
-                <strong>{top_task['task']}</strong><br>
-                Category: {top_task['category']}<br>
-                {int(top_task['total_minutes'])}m across {int(top_task['sessions'])} sessions
+            <div style="background: {insight_bg}; border: 1px solid {insight_color}; border-radius: 8px; padding: 16px; margin: 8px 0;">
+                <div style="display: flex; align-items: center; margin-bottom: 8px;">
+                    <span style="font-size: 1.1em; font-weight: bold; color: {insight_color};">{insight_level} FOCUS</span>
+                </div>
+                <div style="font-weight: bold; font-size: 1.1em; color: #1f2937; margin-bottom: 4px;">
+                    {top_task['task'][:30]}{'...' if len(top_task['task']) > 30 else ''}
+                </div>
+                <div style="color: #6b7280; font-size: 0.9em; margin-bottom: 8px;">
+                    {top_task['category']} • {int(top_task['total_minutes'])}min • {int(top_task['sessions'])} sessions
+                </div>
+                <div style="background: rgba(59, 130, 246, 0.1); border-radius: 4px; padding: 8px; margin-bottom: 8px;">
+                    <div style="font-size: 0.85em; color: #374151;">
+                        <strong>{top_task_pct:.0f}%</strong> of your total focus time
+                    </div>
+                </div>
+                <div style="font-size: 0.8em; color: #6b7280; font-style: italic;">
+                    💡 {recommendation}
+                </div>
             </div>
             """, unsafe_allow_html=True)
             
-            # Task diversity insight
-            categories_count = task_stats['category'].nunique()
-            if categories_count >= 3:
-                st.markdown(f"""
-                <div style="background: #f0fdf4; border-left: 4px solid #10b981; padding: 12px; margin: 8px 0; border-radius: 4px;">
-                    <strong>🌟 Great Diversity!</strong><br>
-                    Working across <strong>{categories_count} categories</strong><br>
-                    with <strong>{total_tasks} different tasks</strong>
-                </div>
-                """, unsafe_allow_html=True)
-            elif categories_count == 2:
-                st.markdown(f"""
-                <div style="background: #fffbeb; border-left: 4px solid #f59e0b; padding: 12px; margin: 8px 0; border-radius: 4px;">
-                    <strong>⚖️ Balanced Focus</strong><br>
-                    Working across <strong>{categories_count} categories</strong><br>
-                    Consider exploring more areas?
-                </div>
-                """, unsafe_allow_html=True)
+            # === PRODUCTIVITY PATTERNS ===
+            st.markdown("##### 🔍 Productivity Patterns")
+            
+            # Deep work analysis
+            deep_work_tasks = task_stats[task_stats['avg_session'] >= 23]  # Close to full pomodoro
+            shallow_work_tasks = task_stats[task_stats['avg_session'] < 15]  # Interrupted sessions
+            
+            deep_work_pct = len(deep_work_tasks) / len(task_stats) * 100 if len(task_stats) > 0 else 0
+            deep_work_time_pct = deep_work_tasks['total_minutes'].sum() / task_stats['total_minutes'].sum() * 100 if len(deep_work_tasks) > 0 else 0
+            
+            # Focus quality assessment
+            if deep_work_pct >= 60:
+                focus_quality = "🚀 EXCELLENT"
+                focus_color = "#059669"
+                focus_advice = "You excel at sustained focus!"
+            elif deep_work_pct >= 40:
+                focus_quality = "💪 STRONG"
+                focus_color = "#3b82f6"
+                focus_advice = "Good focus habits developing"
+            elif deep_work_pct >= 25:
+                focus_quality = "⚡ BUILDING"
+                focus_color = "#f59e0b"
+                focus_advice = "Room for deeper concentration"
             else:
+                focus_quality = "🎯 DEVELOPING"
+                focus_color = "#dc2626"
+                focus_advice = "Focus on fewer interruptions"
+            
+            col_a, col_b = st.columns(2)
+            
+            with col_a:
                 st.markdown(f"""
-                <div style="background: #fef2f2; border-left: 4px solid #ef4444; padding: 12px; margin: 8px 0; border-radius: 4px;">
-                    <strong>🎯 Laser Focus</strong><br>
-                    Concentrating on <strong>1 category</strong><br>
-                    Very focused approach!
+                <div style="background: #f8fafc; border: 1px solid {focus_color}; border-radius: 6px; padding: 12px; text-align: center;">
+                    <div style="font-weight: bold; color: {focus_color}; font-size: 0.9em;">{focus_quality}</div>
+                    <div style="font-size: 1.5em; font-weight: bold; color: #1f2937; margin: 4px 0;">{deep_work_pct:.0f}%</div>
+                    <div style="font-size: 0.75em; color: #6b7280;">Deep Focus Tasks</div>
                 </div>
                 """, unsafe_allow_html=True)
             
-            # Session efficiency insight
-            efficient_tasks = task_stats[task_stats['avg_session'] >= 20]  # 20+ min sessions
-            if len(efficient_tasks) > 0:
-                efficiency_pct = len(efficient_tasks) / len(task_stats) * 100
+            with col_b:
+                # Task switching analysis
+                categories_count = task_stats['category'].nunique()
+                switching_score = min(100, (categories_count / max(1, len(task_stats) / 3)) * 100)
+                
+                if switching_score <= 50:
+                    switch_quality = "🎯 FOCUSED"
+                    switch_color = "#059669"
+                elif switching_score <= 75:
+                    switch_quality = "⚖️ BALANCED"
+                    switch_color = "#3b82f6"
+                else:
+                    switch_quality = "🔄 DIVERSE"
+                    switch_color = "#f59e0b"
+                
                 st.markdown(f"""
-                <div style="background: #f0f9ff; border-left: 4px solid #06b6d4; padding: 12px; margin: 8px 0; border-radius: 4px;">
-                    <strong>⚡ Efficiency Score</strong><br>
-                    <strong>{efficiency_pct:.0f}%</strong> of tasks have<br>
-                    20+ minute sessions (deep work!)
+                <div style="background: #f8fafc; border: 1px solid {switch_color}; border-radius: 6px; padding: 12px; text-align: center;">
+                    <div style="font-weight: bold; color: {switch_color}; font-size: 0.9em;">{switch_quality}</div>
+                    <div style="font-size: 1.5em; font-weight: bold; color: #1f2937; margin: 4px 0;">{categories_count}</div>
+                    <div style="font-size: 0.75em; color: #6b7280;">Categories</div>
                 </div>
                 """, unsafe_allow_html=True)
+            
+            # === ACTIONABLE RECOMMENDATIONS ===
+            st.markdown("##### 🎯 Smart Recommendations")
+            
+            recommendations = []
+            
+            # Time investment recommendation
+            if top_task_pct > 50:
+                recommendations.append({
+                    "icon": "⚖️",
+                    "title": "Diversify Focus",
+                    "desc": f"Consider allocating time to other important areas",
+                    "priority": "medium"
+                })
+            
+            # Deep work recommendation
+            if deep_work_pct < 40:
+                recommendations.append({
+                    "icon": "🧠",
+                    "title": "Enhance Deep Work",
+                    "desc": "Try longer, uninterrupted focus sessions",
+                    "priority": "high"
+                })
+            elif len(shallow_work_tasks) > len(task_stats) * 0.3:
+                recommendations.append({
+                    "icon": "🔧",
+                    "title": "Reduce Interruptions",
+                    "desc": f"{len(shallow_work_tasks)} tasks had short sessions",
+                    "priority": "medium"
+                })
+            
+            # Task management recommendation
+            if len(task_stats) > 8:
+                recommendations.append({
+                    "icon": "📋",
+                    "title": "Task Consolidation",
+                    "desc": f"Consider grouping some of your {len(task_stats)} tasks",
+                    "priority": "low"
+                })
+            
+            # Session efficiency recommendation
+            avg_efficiency = task_stats['avg_session'].mean()
+            if avg_efficiency < 20:
+                recommendations.append({
+                    "icon": "⏰",
+                    "title": "Extend Sessions",
+                    "desc": f"Average {avg_efficiency:.0f}min - aim for 25min blocks",
+                    "priority": "high"
+                })
+            
+            # Display recommendations with priority styling
+            for i, rec in enumerate(recommendations[:3]):  # Show top 3 recommendations
+                priority_colors = {
+                    "high": {"bg": "#fef2f2", "border": "#dc2626", "text": "#991b1b"},
+                    "medium": {"bg": "#fffbeb", "border": "#f59e0b", "text": "#92400e"},
+                    "low": {"bg": "#f0f9ff", "border": "#3b82f6", "text": "#1e40af"}
+                }
+                
+                colors = priority_colors[rec["priority"]]
+                
+                st.markdown(f"""
+                <div style="background: {colors['bg']}; border-left: 3px solid {colors['border']}; padding: 10px; margin: 6px 0; border-radius: 0 4px 4px 0;">
+                    <div style="font-weight: bold; color: {colors['text']}; font-size: 0.9em;">
+                        {rec['icon']} {rec['title']}
+                    </div>
+                    <div style="color: #4b5563; font-size: 0.8em; margin-top: 2px;">
+                        {rec['desc']}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # === WEEKLY MOMENTUM INDICATOR ===
+            if time_filter != "Last 7 days":
+                st.markdown("##### 🔥 Focus Momentum")
+                
+                # Calculate momentum based on recent activity
+                recent_7_days = task_stats[task_stats.index.isin(
+                    filtered_work[filtered_work['date'] >= today - timedelta(days=7)].groupby(['category', 'task']).first().index
+                )] if len(filtered_work) > 0 else pd.DataFrame()
+                
+                if len(recent_7_days) > 0:
+                    recent_total_time = recent_7_days['total_minutes'].sum()
+                    momentum_score = min(100, (recent_total_time / max(1, total_time_invested * 0.3)) * 100)
+                    
+                    if momentum_score >= 80:
+                        momentum_status = "🚀 ON FIRE"
+                        momentum_color = "#dc2626"
+                        momentum_desc = "Exceptional recent focus!"
+                    elif momentum_score >= 60:
+                        momentum_status = "🔥 STRONG"
+                        momentum_color = "#f59e0b"
+                        momentum_desc = "Great momentum building"
+                    elif momentum_score >= 40:
+                        momentum_status = "⚡ STEADY"
+                        momentum_color = "#3b82f6"
+                        momentum_desc = "Consistent progress"
+                    else:
+                        momentum_status = "🌱 BUILDING"
+                        momentum_color = "#6b7280"
+                        momentum_desc = "Time to ramp up focus"
+                    
+                    st.markdown(f"""
+                    <div style="background: linear-gradient(90deg, rgba(59, 130, 246, 0.1), rgba(99, 102, 241, 0.1)); 
+                                border: 1px solid {momentum_color}; border-radius: 6px; padding: 12px; text-align: center; margin: 8px 0;">
+                        <div style="font-weight: bold; color: {momentum_color}; font-size: 0.95em;">{momentum_status}</div>
+                        <div style="font-size: 1.2em; font-weight: bold; color: #1f2937; margin: 4px 0;">
+                            {int(recent_total_time)}min
+                        </div>
+                        <div style="font-size: 0.75em; color: #6b7280;">Focus time (last 7 days)</div>
+                        <div style="font-size: 0.7em; color: #9ca3af; margin-top: 4px; font-style: italic;">
+                            {momentum_desc}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+        else:
+            # Enhanced empty state
+            st.markdown(f"""
+            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 12px; text-align: center; margin: 10px 0;">
+                <h4 style="margin: 0 0 10px 0; color: white;">🎯 Ready for Insights?</h4>
+                <p style="margin: 0; color: white; font-size: 0.9em;">Complete a few focus sessions to unlock smart analytics and personalized recommendations!</p>
+            </div>
+            """, unsafe_allow_html=True)
         
         # Recent activity pattern
         if len(filtered_work) >= 7:
