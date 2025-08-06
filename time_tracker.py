@@ -102,7 +102,7 @@ def init_session_state():
         "is_break": False,
         "category": "",
         "task": "",
-        "custom_categories": ["Learning", "Startup", "Projects", "Planning"],
+        "custom_categories": ["Learning", "Development", "Research", "Planning"],
         "user": None,
         "page": "🎯 Focus Timer",
         "period_targets": [{"category": "", "task": "", "daily_sessions": 1}]
@@ -1718,6 +1718,19 @@ def render_period_targets_page():
     # Create new plan
     st.markdown("### ➕ Create New Plan")
     
+    # Target management buttons (outside form to avoid reloading)
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("➕ Add Target", key="add_target_btn"):
+            st.session_state.period_targets.append({"category": "", "task": "", "daily_sessions": 1})
+            st.rerun()
+    
+    with col2:
+        if len(st.session_state.period_targets) > 1:
+            if st.button("➖ Remove Last", key="remove_target_btn"):
+                st.session_state.period_targets.pop()
+                st.rerun()
+    
     with st.form("period_target_form", clear_on_submit=True):
         col1, col2, col3 = st.columns([2, 1, 1])
         
@@ -1752,22 +1765,9 @@ def render_period_targets_page():
         if 'period_targets' not in st.session_state:
             st.session_state.period_targets = [{"category": "", "task": "", "daily_sessions": 1}]
         
-        # Add/Remove target buttons
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            if st.form_submit_button("➕ Add Target", type="secondary"):
-                st.session_state.period_targets.append({"category": "", "task": "", "daily_sessions": 1})
-                st.rerun()
-        
-        with col2:
-            if len(st.session_state.period_targets) > 1:
-                if st.form_submit_button("➖ Remove Last", type="secondary"):
-                    st.session_state.period_targets.pop()
-                    st.rerun()
-        
         # Target input fields
         targets_data = []
-        categories = st.session_state.custom_categories + ["Other"]
+        categories = st.session_state.custom_categories + ["+ Add New Category"]
         
         for i, target in enumerate(st.session_state.period_targets):
             st.markdown(f"**Target {i+1}:**")
@@ -1780,6 +1780,18 @@ def render_period_targets_page():
                     key=f"cat_{i}",
                     index=categories.index(target["category"]) if target["category"] in categories else 0
                 )
+                
+                # Handle new category addition
+                if category == "+ Add New Category":
+                    new_category = st.text_input(
+                        f"New Category Name {i+1}",
+                        placeholder="Enter new category",
+                        key=f"new_cat_{i}"
+                    )
+                    if new_category and new_category not in st.session_state.custom_categories:
+                        category = new_category
+                    else:
+                        category = ""
             
             with col2:
                 task = st.text_input(
@@ -1798,7 +1810,11 @@ def render_period_targets_page():
                     key=f"sessions_{i}"
                 )
             
-            if category and task:
+            if category and task and category != "+ Add New Category":
+                # Add new category to custom categories if it's new
+                if category not in st.session_state.custom_categories:
+                    st.session_state.custom_categories.append(category)
+                
                 targets_data.append({
                     "category": category,
                     "task": task,
