@@ -1628,10 +1628,27 @@ def render_period_targets_page():
     """Render Weekly/21-Day Target Planning interface"""
     st.header("🎯 Weekly/21-Day Target Planning")
     
+    # Initialize period plan state
+    if 'period_plan' not in st.session_state:
+        st.session_state.period_plan = {
+            "name": "",
+            "start_date": datetime.now(IST).date(),
+            "duration_days": 7,
+            "targets": [],
+            "editing_target": None
+        }
+    
+    if 'temp_target' not in st.session_state:
+        st.session_state.temp_target = {
+            "category": "",
+            "task": "",
+            "daily_sessions": 1
+        }
+    
     # Get active targets
     active_targets = get_active_period_targets(st.session_state.user)
     
-    # Display active plans
+    # === ACTIVE PLANS SECTION ===
     if active_targets:
         st.markdown("### 📊 Active Plans")
         
@@ -1715,153 +1732,359 @@ def render_period_targets_page():
         
         st.divider()
     
-    # Create new plan
+    # === PLAN CREATION SECTION ===
     st.markdown("### ➕ Create New Plan")
     
-    # Target management buttons (outside form to avoid reloading)
-    col1, col2 = st.columns([1, 1])
+    # === PLAN METADATA ===
+    st.markdown("#### 📋 Plan Information")
+    
+    col1, col2 = st.columns([2, 1])
+    
     with col1:
-        if st.button("➕ Add Target", key="add_target_btn"):
-            st.session_state.period_targets.append({"category": "", "task": "", "daily_sessions": 1})
-            st.rerun()
+        plan_name = st.text_input(
+            "Plan Name", 
+            value=st.session_state.period_plan["name"],
+            placeholder="e.g., UGC NET Preparation Week 1",
+            key="plan_name_input"
+        )
+        if plan_name != st.session_state.period_plan["name"]:
+            st.session_state.period_plan["name"] = plan_name
     
     with col2:
-        if len(st.session_state.period_targets) > 1:
-            if st.button("➖ Remove Last", key="remove_target_btn"):
-                st.session_state.period_targets.pop()
-                st.rerun()
+        period_options = [
+            ("1 Week", 7),
+            ("3 Weeks", 21),
+            ("1 Month", 30),
+            ("Custom", 0)
+        ]
+        
+        period_labels = [opt[0] for opt in period_options]
+        current_duration = st.session_state.period_plan["duration_days"]
+        
+        # Find current selection
+        current_idx = 0
+        for i, (label, days) in enumerate(period_options):
+            if days == current_duration:
+                current_idx = i
+                break
+            elif label == "Custom":
+                current_idx = i
+        
+        selected_period = st.selectbox(
+            "Duration",
+            period_labels,
+            index=current_idx,
+            key="period_duration_select"
+        )
+        
+        selected_days = next(days for label, days in period_options if label == selected_period)
+        
+        if selected_period == "Custom":
+            custom_days = st.number_input(
+                "Custom Days", 
+                min_value=1, 
+                max_value=90, 
+                value=current_duration if current_duration not in [7, 21, 30] else 7,
+                key="custom_days_input"
+            )
+            st.session_state.period_plan["duration_days"] = custom_days
+        else:
+            st.session_state.period_plan["duration_days"] = selected_days
     
-    with st.form("period_target_form", clear_on_submit=True):
-        col1, col2, col3 = st.columns([2, 1, 1])
+    # Date selection
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        start_date = st.date_input(
+            "🚀 Start Date", 
+            value=st.session_state.period_plan["start_date"],
+            key="plan_start_date"
+        )
+        st.session_state.period_plan["start_date"] = start_date
+    
+    with col2:
+        end_date = start_date + timedelta(days=st.session_state.period_plan["duration_days"] - 1)
+        st.date_input("🏁 End Date", value=end_date, disabled=True, key="plan_end_date_display")
+    
+    st.divider()
+    
+    # === TARGET MANAGEMENT ===
+    st.markdown("#### 🎯 Daily Targets")
+    
+    # Current targets display
+    if st.session_state.period_plan["targets"]:
+        st.markdown("**Current Targets:**")
+        
+        for i, target in enumerate(st.session_state.period_plan["targets"]):
+            col1, col2, col3, col4 = st.columns([2, 2, 1, 1])
+            
+            with col1:
+                st.markdown(f"📂 **{target['category']}**")
+            
+            with col2:
+                st.markdown(f"🎯 {target['task']}")
+            
+            with col3:
+                st.markdown(f"**{target['daily_sessions']}** sessions/day")
+            
+            with col4:
+                if st.button("🗑️", key=f"remove_target_{i}", help="Remove target"):
+                    st.session_state.period_plan["targets"].pop(i)
+                    st.rerun()
+        
+        st.divider()
+    
+    # === ADD NEW TARGET INTERFACE ===
+    st.markdown("**Add New Target:**")
+    
+    col1, col2, col3, col4 = st.columns([2, 3, 1, 1])
+    
+    with col1:
+        # Category selection with new category option
+        available_categories = st.session_state.custom_categories.copy()
+        
+        category_options = available_categories + ["+ Add New Category"]
+        
+        selected_category = st.selectbox(
+            "Category",
+            category_options,
+            key="new_target_category",
+            help="Select existing category or add a new one"
+        )
+        
+        if selected_category == "+ Add New Category":
+            new_category = st.text_input(
+                "New Category Name",
+                placeholder="Enter category name",
+                key="new_category_input"
+            )
+            
+            if new_category:
+                if st.button("➕ Add Category", key="add_category_btn", type="secondary"):
+                    if new_category.strip() and new_category.strip() not in st.session_state.custom_categories:
+                        st.session_state.custom_categories.append(new_category.strip())
+                        st.session_state.temp_target["category"] = new_category.strip()
+                        st.success(f"✅ Category '{new_category.strip()}' added!")
+                        st.rerun()
+                    else:
+                        st.warning("⚠️ Category already exists or is empty")
+                
+                st.session_state.temp_target["category"] = new_category.strip() if new_category.strip() else ""
+            else:
+                st.session_state.temp_target["category"] = ""
+        else:
+            st.session_state.temp_target["category"] = selected_category
+    
+    with col2:
+        task_input = st.text_input(
+            "Task",
+            value=st.session_state.temp_target["task"],
+            placeholder="e.g., UGC NET Paper 1, SQL Projects",
+            key="new_target_task"
+        )
+        st.session_state.temp_target["task"] = task_input
+    
+    with col3:
+        sessions_input = st.number_input(
+            "Sessions/day",
+            min_value=1,
+            max_value=10,
+            value=st.session_state.temp_target["daily_sessions"],
+            key="new_target_sessions"
+        )
+        st.session_state.temp_target["daily_sessions"] = sessions_input
+    
+    with col4:
+        # Add target button
+        can_add_target = (
+            st.session_state.temp_target["category"] and 
+            st.session_state.temp_target["category"] != "+ Add New Category" and
+            st.session_state.temp_target["task"].strip()
+        )
+        
+        if st.button(
+            "➕ Add Target", 
+            key="add_target_btn", 
+            type="primary",
+            disabled=not can_add_target
+        ):
+            # Check for duplicates
+            existing_tasks = [
+                (t["category"], t["task"]) 
+                for t in st.session_state.period_plan["targets"]
+            ]
+            
+            new_combo = (
+                st.session_state.temp_target["category"], 
+                st.session_state.temp_target["task"].strip()
+            )
+            
+            if new_combo not in existing_tasks:
+                st.session_state.period_plan["targets"].append({
+                    "category": st.session_state.temp_target["category"],
+                    "task": st.session_state.temp_target["task"].strip(),
+                    "daily_sessions": st.session_state.temp_target["daily_sessions"]
+                })
+                
+                # Reset temp target
+                st.session_state.temp_target = {
+                    "category": "",
+                    "task": "",
+                    "daily_sessions": 1
+                }
+                
+                st.success("✅ Target added!")
+                st.rerun()
+            else:
+                st.error("⚠️ This category-task combination already exists")
+        
+        if not can_add_target:
+            if not st.session_state.temp_target["category"]:
+                st.caption("⚠️ Select category")
+            elif not st.session_state.temp_target["task"].strip():
+                st.caption("⚠️ Enter task")
+    
+    st.divider()
+    
+    # === PLAN SUMMARY ===
+    if st.session_state.period_plan["targets"] and st.session_state.period_plan["name"].strip():
+        st.markdown("#### 📊 Plan Summary")
+        
+        targets = st.session_state.period_plan["targets"]
+        duration = st.session_state.period_plan["duration_days"]
+        
+        total_daily_sessions = sum(t["daily_sessions"] for t in targets)
+        total_period_sessions = total_daily_sessions * duration
+        total_hours = (total_period_sessions * 25) / 60
+        
+        col1, col2, col3 = st.columns(3)
         
         with col1:
-            plan_name = st.text_input("📋 Plan Name", placeholder="e.g., UGC NET Preparation Week 1")
+            st.metric("📅 Daily Sessions", total_daily_sessions)
         
         with col2:
-            period_type = st.selectbox("📅 Period Type", ["1 Week (7 days)", "3 Weeks (21 days)", "Custom"])
+            st.metric("🎯 Total Sessions", total_period_sessions)
         
         with col3:
-            if period_type == "Custom":
-                custom_days = st.number_input("Days", min_value=1, max_value=90, value=7)
-            else:
-                custom_days = 7 if "1 Week" in period_type else 21
+            st.metric("⏰ Total Hours", f"{total_hours:.1f}h")
         
-        # Date selection
-        col1, col2 = st.columns(2)
-        with col1:
-            start_date = st.date_input("🚀 Start Date", datetime.now(IST).date())
+        # Detailed breakdown
+        st.markdown("**Target Breakdown:**")
+        
+        for target in targets:
+            daily_minutes = target["daily_sessions"] * 25
+            period_total = target["daily_sessions"] * duration
+            
+            st.markdown(f"""
+            <div style="background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px; margin: 6px 0;">
+                <div style="font-weight: bold; color: #1f2937; margin-bottom: 4px;">
+                    🎯 {target['task']} <span style="color: #6b7280;">({target['category']})</span>
+                </div>
+                <div style="font-size: 0.9em; color: #6b7280;">
+                    📅 {target['daily_sessions']} sessions/day ({daily_minutes}min/day) → 
+                    🎯 {period_total} total sessions ({period_total * 25}min total)
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        st.divider()
+        
+        # === CREATE PLAN BUTTON ===
+        col1, col2, col3 = st.columns([1, 2, 1])
+        
         with col2:
-            if period_type == "Custom":
-                end_date = start_date + timedelta(days=custom_days - 1)
-            else:
-                end_date = start_date + timedelta(days=custom_days - 1)
-            st.date_input("🏁 End Date", end_date, disabled=True)
-        
-        # Dynamic target inputs
-        st.markdown("#### 🎯 Daily Targets")
-        st.markdown("Add your daily session targets for each category-task combination:")
-        
-        # Initialize session state for dynamic targets
-        if 'period_targets' not in st.session_state:
-            st.session_state.period_targets = [{"category": "", "task": "", "daily_sessions": 1}]
-        
-        # Target input fields
-        targets_data = []
-        categories = st.session_state.custom_categories + ["+ Add New Category"]
-        
-        for i, target in enumerate(st.session_state.period_targets):
-            st.markdown(f"**Target {i+1}:**")
-            col1, col2, col3 = st.columns([2, 3, 1])
-            
-            with col1:
-                category = st.selectbox(
-                    f"Category {i+1}", 
-                    categories, 
-                    key=f"cat_{i}",
-                    index=categories.index(target["category"]) if target["category"] in categories else 0
-                )
-                
-                # Handle new category addition
-                if category == "+ Add New Category":
-                    new_category = st.text_input(
-                        f"New Category Name {i+1}",
-                        placeholder="Enter new category",
-                        key=f"new_cat_{i}"
+            if st.button("🚀 Create Plan", key="create_plan_btn", type="primary", use_container_width=True):
+                # Validate plan
+                if not st.session_state.period_plan["name"].strip():
+                    st.error("⚠️ Please enter a plan name")
+                elif not st.session_state.period_plan["targets"]:
+                    st.error("⚠️ Please add at least one target")
+                else:
+                    # Save plan
+                    save_period_target(
+                        st.session_state.period_plan["name"].strip(),
+                        st.session_state.period_plan["start_date"].isoformat(),
+                        end_date.isoformat(),
+                        st.session_state.period_plan["targets"],
+                        st.session_state.user
                     )
-                    if new_category and new_category not in st.session_state.custom_categories:
-                        category = new_category
-                    else:
-                        category = ""
-            
-            with col2:
-                task = st.text_input(
-                    f"Task {i+1}", 
-                    value=target["task"],
-                    placeholder="e.g., UGC NET Paper 1, SQL Projects",
-                    key=f"task_{i}"
-                )
-            
-            with col3:
-                daily_sessions = st.number_input(
-                    f"Sessions/day {i+1}", 
-                    min_value=1, 
-                    max_value=10, 
-                    value=target["daily_sessions"],
-                    key=f"sessions_{i}"
-                )
-            
-            if category and task and category != "+ Add New Category":
-                # Add new category to custom categories if it's new
-                if category not in st.session_state.custom_categories:
-                    st.session_state.custom_categories.append(category)
-                
-                targets_data.append({
-                    "category": category,
-                    "task": task,
-                    "daily_sessions": daily_sessions
-                })
+                    
+                    # Reset plan state
+                    st.session_state.period_plan = {
+                        "name": "",
+                        "start_date": datetime.now(IST).date(),
+                        "duration_days": 7,
+                        "targets": [],
+                        "editing_target": None
+                    }
+                    
+                    st.session_state.temp_target = {
+                        "category": "",
+                        "task": "",
+                        "daily_sessions": 1
+                    }
+                    
+                    st.success("✅ Plan created successfully!")
+                    st.rerun()
+    
+    else:
+        # Call to action
+        missing_items = []
+        if not st.session_state.period_plan["name"].strip():
+            missing_items.append("plan name")
+        if not st.session_state.period_plan["targets"]:
+            missing_items.append("targets")
         
-        # Plan summary
-        if targets_data:
-            st.markdown("#### 📊 Plan Summary")
-            total_daily_sessions = sum(t["daily_sessions"] for t in targets_data)
-            total_period_sessions = total_daily_sessions * custom_days
-            total_hours = (total_period_sessions * 25) / 60
+        if missing_items:
+            st.info(f"📝 Please add: {', '.join(missing_items)} to create your plan")
+        
+        # Show example or help
+        with st.expander("💡 How to create a plan"):
+            st.markdown("""
+            **Steps to create your period target plan:**
             
-            col1, col2, col3 = st.columns(3)
+            1. **📋 Plan Information**: Enter a descriptive name and select duration
+            2. **🎯 Add Targets**: For each area you want to focus on:
+               - Select or create a category (e.g., "Learning", "Projects")  
+               - Enter specific task (e.g., "UGC NET Paper 1", "SQL Practice")
+               - Set daily sessions target (how many 25min sessions per day)
+            3. **📊 Review Summary**: Check your plan before creating
+            4. **🚀 Create Plan**: Your plan will become active immediately
+            
+            **Example Plan: "UGC NET Preparation Week"**
+            - 🎯 UGC NET Paper 1 (Learning): 1 session/day  
+            - 🎯 UGC NET Paper 2 (Learning): 1 session/day
+            - 🎯 SQL Projects (Development): 1 session/day
+            - 🎯 Practice Tests (Practice): 1 session/day
+            
+            **Total**: 4 sessions/day (100 min/day) = 700 minutes/week
+            """)
+        
+        # Quick start templates
+        with st.expander("🚀 Quick Start Templates"):
+            col1, col2 = st.columns(2)
+            
             with col1:
-                st.metric("📅 Daily Sessions", total_daily_sessions)
-            with col2:
-                st.metric("🎯 Total Sessions", total_period_sessions)
-            with col3:
-                st.metric("⏰ Total Hours", f"{total_hours:.1f}h")
+                if st.button("📚 Study Week Template", key="study_template"):
+                    st.session_state.period_plan["name"] = "Study Week"
+                    st.session_state.period_plan["duration_days"] = 7
+                    st.session_state.period_plan["targets"] = [
+                        {"category": "Learning", "task": "Main Subject", "daily_sessions": 2},
+                        {"category": "Learning", "task": "Practice Problems", "daily_sessions": 1},
+                        {"category": "Research", "task": "Additional Reading", "daily_sessions": 1}
+                    ]
+                    st.rerun()
             
-            # Target breakdown
-            st.markdown("**Daily Breakdown:**")
-            for target in targets_data:
-                daily_minutes = target["daily_sessions"] * 25
-                period_total = target["daily_sessions"] * custom_days
-                st.markdown(f"• **{target['task']}** ({target['category']}): {target['daily_sessions']} sessions/day ({daily_minutes}min) → {period_total} total sessions")
-        
-        # Save plan
-        submitted = st.form_submit_button("🚀 Create Plan", type="primary")
-        
-        if submitted:
-            if not plan_name.strip():
-                st.error("⚠️ Please enter a plan name")
-            elif not targets_data:
-                st.error("⚠️ Please add at least one target with valid category and task")
-            else:
-                save_period_target(
-                    plan_name.strip(),
-                    start_date.isoformat(),
-                    end_date.isoformat(),
-                    targets_data,
-                    st.session_state.user
-                )
-                st.session_state.period_targets = [{"category": "", "task": "", "daily_sessions": 1}]
-                st.success("✅ Plan created successfully!")
-                st.rerun()
+            with col2:
+                if st.button("💼 Project Sprint Template", key="project_template"):
+                    st.session_state.period_plan["name"] = "Project Sprint"
+                    st.session_state.period_plan["duration_days"] = 21
+                    st.session_state.period_plan["targets"] = [
+                        {"category": "Development", "task": "Core Features", "daily_sessions": 2},
+                        {"category": "Development", "task": "Testing", "daily_sessions": 1},
+                        {"category": "Planning", "task": "Documentation", "daily_sessions": 1}
+                    ]
+                    st.rerun()
 
 def render_notes_viewer_page():
     """Render notes viewing interface"""
