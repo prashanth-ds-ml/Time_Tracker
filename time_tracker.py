@@ -541,8 +541,316 @@ def add_note(content, date, user):
     collection.update_one({"_id": note_id}, {"$set": note_doc}, upsert=True)
 
 # === PAGE COMPONENTS ===
+def generate_contribution_calendar(df):
+    """Generate GitHub-style contribution calendar data"""
+    today = datetime.now(IST).date()
+    
+    # Create 365-day grid data
+    calendar_data = []
+    for i in range(365):
+        check_date = today - timedelta(days=364-i)
+        
+        if df.empty:
+            day_sessions = 0
+        else:
+            day_data = df[(df["date"].dt.date == check_date) & (df["pomodoro_type"] == "Work")]
+            day_sessions = len(day_data)
+        
+        # Determine intensity level (0-4 like GitHub)
+        if day_sessions == 0:
+            intensity = 0
+        elif day_sessions == 1:
+            intensity = 1
+        elif day_sessions <= 3:
+            intensity = 2
+        elif day_sessions <= 5:
+            intensity = 3
+        else:
+            intensity = 4
+        
+        # Get weekday (0 = Monday, 6 = Sunday)
+        weekday = check_date.weekday()
+        
+        calendar_data.append({
+            'date': check_date,
+            'sessions': day_sessions,
+            'intensity': intensity,
+            'weekday': weekday,
+            'week': i // 7,
+            'day_name': check_date.strftime('%a'),
+            'month': check_date.strftime('%b'),
+            'day': check_date.day
+        })
+    
+    return calendar_data
+
+def render_contribution_heatmap(calendar_data):
+    """Render GitHub-style contribution heatmap"""
+    
+    # Color mapping for intensity levels
+    colors = {
+        0: "#ebedf0",  # No activity
+        1: "#9be9a8",  # Low activity
+        2: "#40c463",  # Medium-low activity
+        3: "#30a14e",  # Medium-high activity
+        4: "#216e39"   # High activity
+    }
+    
+    # Calculate total sessions for the year
+    total_sessions = sum(day['sessions'] for day in calendar_data)
+    active_days = len([day for day in calendar_data if day['sessions'] > 0])
+    
+    # Create the HTML for the contribution graph
+    html_content = f"""
+    <div style="background: white; padding: 20px; border-radius: 12px; border: 1px solid #e1e5e9; margin: 20px 0;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+            <h3 style="margin: 0; color: #24292f;">📅 Focus Consistency (365 days)</h3>
+            <div style="font-size: 14px; color: #656d76;">
+                <strong>{total_sessions}</strong> sessions in the last year • <strong>{active_days}</strong> active days
+            </div>
+        </div>
+        
+        <div style="display: flex; align-items: center; gap: 12px;">
+            <!-- Month labels -->
+            <div style="width: 100%; overflow-x: auto;">
+                <div style="display: flex; margin-bottom: 8px; gap: 11px; font-size: 11px; color: #656d76;">
+    """
+    
+    # Add month labels
+    months_shown = set()
+    for week in range(0, 53):
+        week_start = min(week * 7, len(calendar_data) - 1)
+        if week_start < len(calendar_data):
+            month = calendar_data[week_start]['month']
+            if month not in months_shown:
+                html_content += f"<div style='width: 12px; text-align: center;'>{month}</div>"
+                months_shown.add(month)
+            else:
+                html_content += "<div style='width: 12px;'></div>"
+    
+    html_content += """
+                </div>
+                
+                <div style="display: flex; gap: 3px;">
+    """
+    
+    # Create the grid (53 weeks x 7 days)
+    for week in range(53):
+        html_content += "<div style='display: flex; flex-direction: column; gap: 3px;'>"
+        
+        for day in range(7):
+            day_index = week * 7 + day
+            if day_index < len(calendar_data):
+                day_data = calendar_data[day_index]
+                color = colors[day_data['intensity']]
+                
+                # Create tooltip text
+                sessions_text = f"{day_data['sessions']} session{'s' if day_data['sessions'] != 1 else ''}"
+                date_str = day_data['date'].strftime('%B %d, %Y')
+                
+                html_content += f"""
+                <div style="width: 12px; height: 12px; background-color: {color}; border-radius: 2px; 
+                           border: 1px solid rgba(1,4,9,0.1);"
+                     title="{sessions_text} on {date_str}">
+                </div>
+                """
+            else:
+                html_content += "<div style='width: 12px; height: 12px;'></div>"
+        
+        html_content += "</div>"
+    
+    html_content += """
+                </div>
+            </div>
+        </div>
+        
+        <!-- Legend -->
+        <div style="display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 16px; font-size: 12px; color: #656d76;">
+            <span>Less</span>
+    """
+    
+    # Add legend squares
+    for i in range(5):
+        color = colors[i]
+        html_content += f'<div style="width: 10px; height: 10px; background-color: {color}; border-radius: 2px; border: 1px solid rgba(1,4,9,0.1);"></div>'
+    
+    html_content += """
+            <span>More</span>
+        </div>
+    </div>
+    """
+    
+    return html_content
+
+def render_dashboard_metrics(df, today_progress, today_minutes):
+    """Render key dashboard metrics"""
+    today = datetime.now(IST).date()
+    
+    if df.empty:
+        metrics = {
+            'total_sessions': 0,
+            'total_hours': 0,
+            'current_streak': 0,
+            'best_streak': 0,
+            'weekly_avg': 0,
+            'monthly_total': 0
+        }
+    else:
+        df_work = df[df["pomodoro_type"] == "Work"]
+        
+        # Calculate metrics
+        total_sessions = len(df_work)
+        total_hours = df_work['duration'].sum() // 60
+        
+        # Streak calculations
+        daily_counts = df_work.groupby(df_work["date"].dt.date).size()
+        active_days = len(daily_counts)
+        min_sessions = 1 if active_days <= 12 else 2
+        
+        # Current streak
+        current_streak = 0
+        for i in range(365):
+            check_date = today - timedelta(days=i)
+            day_count = daily_counts.get(check_date, 0)
+            if day_count >= min_sessions:
+                current_streak += 1
+            else:
+                break
+        
+        # Best streak
+        best_streak = 0
+        temp_streak = 0
+        for i in range(365):
+            check_date = today - timedelta(days=364-i)
+            day_count = daily_counts.get(check_date, 0)
+            if day_count >= min_sessions:
+                temp_streak += 1
+                best_streak = max(best_streak, temp_streak)
+            else:
+                temp_streak = 0
+        
+        # Weekly average
+        last_4_weeks = df_work[df_work["date"] >= (today - timedelta(days=28))]
+        weekly_avg = len(last_4_weeks) / 4
+        
+        # Monthly total
+        this_month = df_work[df_work["date"].dt.month == today.month]
+        monthly_total = len(this_month)
+        
+        metrics = {
+            'total_sessions': total_sessions,
+            'total_hours': total_hours,
+            'current_streak': current_streak,
+            'best_streak': best_streak,
+            'weekly_avg': weekly_avg,
+            'monthly_total': monthly_total
+        }
+    
+    # Render metrics cards
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    
+    with col1:
+        streak_color = "#dc2626" if metrics['current_streak'] >= 7 else "#f59e0b" if metrics['current_streak'] >= 3 else "#3b82f6"
+        st.markdown(f"""
+        <div style="background: white; border: 1px solid {streak_color}; border-radius: 8px; padding: 16px; text-align: center;">
+            <div style="font-size: 2em; color: {streak_color};">🔥</div>
+            <div style="font-size: 1.5em; font-weight: bold; color: #1f2937; margin: 8px 0;">{metrics['current_streak']}</div>
+            <div style="font-size: 0.85em; color: #6b7280;">Current Streak</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown(f"""
+        <div style="background: white; border: 1px solid #10b981; border-radius: 8px; padding: 16px; text-align: center;">
+            <div style="font-size: 2em; color: #10b981;">🎯</div>
+            <div style="font-size: 1.5em; font-weight: bold; color: #1f2937; margin: 8px 0;">{metrics['total_sessions']}</div>
+            <div style="font-size: 0.85em; color: #6b7280;">Total Sessions</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown(f"""
+        <div style="background: white; border: 1px solid #3b82f6; border-radius: 8px; padding: 16px; text-align: center;">
+            <div style="font-size: 2em; color: #3b82f6;">⏰</div>
+            <div style="font-size: 1.5em; font-weight: bold; color: #1f2937; margin: 8px 0;">{metrics['total_hours']}h</div>
+            <div style="font-size: 0.85em; color: #6b7280;">Total Focus</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col4:
+        st.markdown(f"""
+        <div style="background: white; border: 1px solid #8b5cf6; border-radius: 8px; padding: 16px; text-align: center;">
+            <div style="font-size: 2em; color: #8b5cf6;">🏆</div>
+            <div style="font-size: 1.5em; font-weight: bold; color: #1f2937; margin: 8px 0;">{metrics['best_streak']}</div>
+            <div style="font-size: 0.85em; color: #6b7280;">Best Streak</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col5:
+        st.markdown(f"""
+        <div style="background: white; border: 1px solid #f59e0b; border-radius: 8px; padding: 16px; text-align: center;">
+            <div style="font-size: 2em; color: #f59e0b;">📊</div>
+            <div style="font-size: 1.5em; font-weight: bold; color: #1f2937; margin: 8px 0;">{metrics['weekly_avg']:.1f}</div>
+            <div style="font-size: 0.85em; color: #6b7280;">Weekly Avg</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col6:
+        st.markdown(f"""
+        <div style="background: white; border: 1px solid #06b6d4; border-radius: 8px; padding: 16px; text-align: center;">
+            <div style="font-size: 2em; color: #06b6d4;">📅</div>
+            <div style="font-size: 1.5em; font-weight: bold; color: #1f2937; margin: 8px 0;">{metrics['monthly_total']}</div>
+            <div style="font-size: 0.85em; color: #6b7280;">This Month</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+def render_active_targets_summary():
+    """Render summary of active period targets"""
+    active_targets = get_active_period_targets(st.session_state.user)
+    
+    if not active_targets:
+        return
+    
+    st.markdown("### 🎯 Active Period Targets")
+    
+    for plan in active_targets[:2]:  # Show max 2 active plans
+        progress, overall_pct, days_elapsed = get_period_target_progress(plan, st.session_state.user)
+        
+        # Compact progress display
+        col1, col2, col3 = st.columns([3, 1, 1])
+        
+        with col1:
+            progress_color = "#10b981" if overall_pct >= 80 else "#3b82f6" if overall_pct >= 60 else "#f59e0b"
+            
+            st.markdown(f"""
+            <div style="background: white; border-left: 4px solid {progress_color}; padding: 12px; border-radius: 0 6px 6px 0; border: 1px solid #e5e7eb;">
+                <div style="font-weight: bold; color: #1f2937; margin-bottom: 4px;">
+                    📋 {plan['plan_name']}
+                </div>
+                <div style="font-size: 0.9em; color: #6b7280; margin-bottom: 8px;">
+                    📅 {plan['start_date']} → {plan['end_date']} • Day {days_elapsed}
+                </div>
+                <div style="background: #f3f4f6; border-radius: 10px; height: 8px; overflow: hidden;">
+                    <div style="background: {progress_color}; height: 100%; width: {min(100, overall_pct):.1f}%; transition: width 0.3s ease;"></div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with col2:
+            st.metric("Progress", f"{overall_pct:.0f}%")
+        
+        with col3:
+            total_targets = len(plan['targets'])
+            on_track = len([p for p in progress.values() if p['percentage'] >= 80])
+            st.metric("On Track", f"{on_track}/{total_targets}")
+    
+    # Quick link to targets page
+    if st.button("📊 View All Targets", key="view_targets_btn"):
+        st.session_state.page = "📅 Period Targets"
+        st.rerun()
+
 def render_focus_timer_page():
-    """Render the main focus timer page"""
+    """Render the enhanced main dashboard page"""
     df = get_user_data(st.session_state.user)
     
     # Check for active timer first
@@ -552,117 +860,135 @@ def render_focus_timer_page():
     # Get today's progress
     today_progress, adaptive_goal, today_minutes = render_daily_goal(df)
     
-    # Daily Target Planner (main feature)
-    render_daily_target_planner(df, today_progress)
+    # === HERO SECTION ===
+    st.markdown("## 🚀 Focus Dashboard")
+    
+    # Generate and display contribution calendar
+    calendar_data = generate_contribution_calendar(df)
+    contribution_html = render_contribution_heatmap(calendar_data)
+    st.markdown(contribution_html, unsafe_allow_html=True)
+    
+    # === KEY METRICS ===
+    st.markdown("### 📊 Your Focus Journey")
+    render_dashboard_metrics(df, today_progress, today_minutes)
+    
     st.divider()
     
-    # Quick start section
-    render_quick_start()
+    # === TODAY'S PROGRESS & QUICK START ===
+    col_today, col_start = st.columns([1, 1])
     
-    # Enhanced Today's summary
+    with col_today:
+        # Daily Target Planner (compact version)
+        render_daily_target_planner(df, today_progress)
+    
+    with col_start:
+        # Quick start section
+        render_quick_start()
+    
+    st.divider()
+    
+    # === ACTIVE TARGETS SUMMARY ===
+    render_active_targets_summary()
+    
+    # === RECENT ACTIVITY ===
     if not df.empty:
         st.divider()
-        st.subheader("📊 Today's Summary")
+        st.markdown("### 📈 Recent Activity")
         
+        # Last 7 days summary
         today = datetime.now(IST).date()
-        today_data = df[df["date"].dt.date == today]
-        breaks_today = len(today_data[today_data["pomodoro_type"] == "Break"])
+        last_7_days = []
         
-        # Enhanced metrics with visual indicators
+        for i in range(7):
+            day_date = today - timedelta(days=6-i)
+            day_data = df[(df["date"].dt.date == day_date) & (df["pomodoro_type"] == "Work")]
+            sessions = len(day_data)
+            minutes = day_data['duration'].sum() if not day_data.empty else 0
+            
+            last_7_days.append({
+                'date': day_date,
+                'day_name': day_date.strftime('%a'),
+                'sessions': sessions,
+                'minutes': minutes,
+                'is_today': day_date == today
+            })
+        
+        # Display 7-day chart
+        cols = st.columns(7)
+        for i, day in enumerate(last_7_days):
+            with cols[i]:
+                # Determine intensity color
+                if day['sessions'] == 0:
+                    color = "#ebedf0"
+                    text_color = "#6b7280"
+                elif day['sessions'] <= 2:
+                    color = "#9be9a8" 
+                    text_color = "#1f2937"
+                elif day['sessions'] <= 4:
+                    color = "#40c463"
+                    text_color = "#1f2937"
+                else:
+                    color = "#216e39"
+                    text_color = "white"
+                
+                border_style = "border: 2px solid #3b82f6;" if day['is_today'] else "border: 1px solid #e5e7eb;"
+                
+                st.markdown(f"""
+                <div style="background: {color}; {border_style} border-radius: 8px; padding: 12px; text-align: center; margin: 2px;">
+                    <div style="font-weight: bold; color: {text_color}; font-size: 0.9em;">{day['day_name']}</div>
+                    <div style="font-size: 1.2em; font-weight: bold; color: {text_color}; margin: 4px 0;">{day['sessions']}</div>
+                    <div style="font-size: 0.75em; color: {text_color};">{day['minutes']}m</div>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # Quick navigation to other features
+        st.divider()
+        st.markdown("### ⚡ Quick Actions")
+        
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            # Work sessions with progress indicator
-            current_target = get_daily_target(st.session_state.user)
-            target_val = current_target if current_target else adaptive_goal
-            
-            if today_progress >= target_val:
-                st.success("🎯 Work Sessions")
-                st.markdown(f"<h2 style='color: #10b981; margin: 0;'>{today_progress}</h2>", unsafe_allow_html=True)
-                st.markdown("✅ Target hit!")
-            elif today_progress > 0:
-                st.info("🎯 Work Sessions") 
-                st.markdown(f"<h2 style='color: #3b82f6; margin: 0;'>{today_progress}</h2>", unsafe_allow_html=True)
-                remaining = target_val - today_progress
-                st.markdown(f"🔥 {remaining} to go!")
-            else:
-                st.warning("🎯 Work Sessions")
-                st.markdown(f"<h2 style='color: #f59e0b; margin: 0;'>{today_progress}</h2>", unsafe_allow_html=True)
-                st.markdown("🚀 Let's start!")
-                
+            if st.button("📊 View Analytics", key="nav_analytics", use_container_width=True):
+                st.session_state.page = "📊 Analytics"
+                st.rerun()
+        
         with col2:
-            # Focus minutes with time indicator
-            hours = today_minutes // 60
-            mins = today_minutes % 60
-            
-            if today_minutes >= 120:  # 2+ hours
-                st.success("⏱️ Focus Time")
-                if hours > 0:
-                    st.markdown(f"<h2 style='color: #10b981; margin: 0;'>{hours}h {mins}m</h2>", unsafe_allow_html=True)
-                else:
-                    st.markdown(f"<h2 style='color: #10b981; margin: 0;'>{mins}m</h2>", unsafe_allow_html=True)
-                st.markdown("🔥 Deep work!")
-            elif today_minutes >= 25:
-                st.info("⏱️ Focus Time")
-                if hours > 0:
-                    st.markdown(f"<h2 style='color: #3b82f6; margin: 0;'>{hours}h {mins}m</h2>", unsafe_allow_html=True)
-                else:
-                    st.markdown(f"<h2 style='color: #3b82f6; margin: 0;'>{mins}m</h2>", unsafe_allow_html=True)
-                st.markdown("💪 Building up!")
-            else:
-                st.warning("⏱️ Focus Time")
-                st.markdown(f"<h2 style='color: #f59e0b; margin: 0;'>{today_minutes}m</h2>", unsafe_allow_html=True)
-                st.markdown("⚡ Just started!")
-                
+            if st.button("🎯 Set Targets", key="nav_targets", use_container_width=True):
+                st.session_state.page = "📅 Period Targets"
+                st.rerun()
+        
         with col3:
-            # Break balance indicator
-            work_break_ratio = breaks_today / max(1, today_progress)
-            
-            if 0.3 <= work_break_ratio <= 0.7:  # Good balance
-                st.success("☕ Break Balance")
-                st.markdown(f"<h2 style='color: #10b981; margin: 0;'>{breaks_today}</h2>", unsafe_allow_html=True)
-                st.markdown("⚖️ Well balanced!")
-            elif work_break_ratio > 0.7:  # Too many breaks
-                st.warning("☕ Break Balance")
-                st.markdown(f"<h2 style='color: #f59e0b; margin: 0;'>{breaks_today}</h2>", unsafe_allow_html=True)
-                st.markdown("🎯 More focus!")
-            else:  # Too few breaks
-                st.info("☕ Break Balance")
-                st.markdown(f"<h2 style='color: #3b82f6; margin: 0;'>{breaks_today}</h2>", unsafe_allow_html=True)
-                st.markdown("🧘 Take breaks!")
-                
+            if st.button("📝 Save Notes", key="nav_notes", use_container_width=True):
+                st.session_state.page = "📝 Notes Saver"
+                st.rerun()
+        
         with col4:
-            # Enhanced target status
-            current_target = get_daily_target(st.session_state.user)
-            
-            if current_target:
-                if today_progress >= current_target:
-                    if today_progress > current_target:
-                        st.success("🚀 Bonus Zone")
-                        bonus = today_progress - current_target
-                        st.markdown(f"<h2 style='color: #10b981; margin: 0;'>+{bonus}</h2>", unsafe_allow_html=True)
-                        st.markdown("🌟 Exceeding!")
-                    else:
-                        st.success("✅ Target Hit")
-                        st.markdown(f"<h2 style='color: #10b981; margin: 0;'>100%</h2>", unsafe_allow_html=True)
-                        st.markdown("🎯 Perfect!")
-                else:
-                    remaining = current_target - today_progress
-                    progress_pct = (today_progress / current_target) * 100
-                    st.info("🎯 Progress")
-                    st.markdown(f"<h2 style='color: #3b82f6; margin: 0;'>{progress_pct:.0f}%</h2>", unsafe_allow_html=True)
-                    st.markdown(f"⏳ {remaining} left!")
-            else:
-                if today_progress >= adaptive_goal:
-                    st.success("✅ Goal Hit")
-                    st.markdown(f"<h2 style='color: #10b981; margin: 0;'>100%</h2>", unsafe_allow_html=True)
-                    st.markdown("🎉 Adaptive goal!")
-                else:
-                    remaining = adaptive_goal - today_progress
-                    progress_pct = (today_progress / adaptive_goal) * 100 if adaptive_goal > 0 else 0
-                    st.info("🎯 Progress")
-                    st.markdown(f"<h2 style='color: #3b82f6; margin: 0;'>{progress_pct:.0f}%</h2>", unsafe_allow_html=True)
-                    st.markdown(f"⏳ {remaining} left!")
+            if st.button("🗂️ View Notes", key="nav_notes_view", use_container_width=True):
+                st.session_state.page = "🗂️ Notes Viewer"
+                st.rerun()
+    
+    else:
+        # Welcome message for new users
+        st.divider()
+        st.markdown("""
+        ### 🌟 Welcome to Your Focus Journey!
+        
+        Start your first Pomodoro session to begin tracking your consistency and building productive habits.
+        
+        **🎯 Quick Tips:**
+        - Set a daily target to stay motivated
+        - Take regular breaks to maintain focus
+        - Track your progress with our GitHub-style contribution graph
+        - Set weekly or monthly targets for bigger goals
+        """)
+        
+        # Motivational call-to-action
+        st.markdown(f"""
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 12px; text-align: center; margin: 20px 0;">
+            <h3 style="margin: 0 0 10px 0; color: white;">🚀 Ready to Start?</h3>
+            <p style="margin: 0; color: white;">Your focus journey begins with a single session. What will you work on first?</p>
+        </div>
+        """, unsafe_allow_html=True)
 
 def render_analytics_page():
     """Render analytics dashboard"""
