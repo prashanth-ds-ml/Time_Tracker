@@ -104,7 +104,8 @@ def init_session_state():
         "task": "",
         "custom_categories": ["Learning", "Startup", "Projects", "Planning"],
         "user": None,
-        "page": "🎯 Focus Timer"
+        "page": "🎯 Focus Timer",
+        "period_targets": [{"category": "", "task": "", "daily_sessions": 1}]
     }
     
     for key, value in defaults.items():
@@ -150,7 +151,7 @@ def render_header():
             st.rerun()
 
     with col_page:
-        pages = ["🎯 Focus Timer", "📝 Notes Saver", "📊 Analytics", "🗂️ Notes Viewer"]
+        pages = ["🎯 Focus Timer", "📅 Period Targets", "📝 Notes Saver", "📊 Analytics", "🗂️ Notes Viewer"]
         selected_page = st.selectbox("📍 Navigate", pages, 
                                    index=pages.index(st.session_state.page) if st.session_state.page in pages else 0)
         st.session_state.page = selected_page
@@ -1536,6 +1537,316 @@ def render_notes_saver_page():
             else:
                 st.warning("⚠️ Please add some content")
 
+def save_period_target(plan_name, start_date, end_date, targets, user):
+    """Save weekly/21-day target plan to database"""
+    plan_id = hashlib.sha256(f"{plan_name}_{start_date}_{user}".encode("utf-8")).hexdigest()
+    plan_doc = {
+        "_id": plan_id,
+        "type": "PeriodTarget",
+        "plan_name": plan_name,
+        "start_date": start_date,
+        "end_date": end_date,
+        "targets": targets,  # List of {category, task, daily_sessions}
+        "user": user,
+        "created_at": datetime.utcnow()
+    }
+    collection.update_one({"_id": plan_id}, {"$set": plan_doc}, upsert=True)
+
+def get_active_period_targets(user):
+    """Get active period targets for user"""
+    today = datetime.now(IST).date().isoformat()
+    targets = list(collection.find({
+        "type": "PeriodTarget",
+        "user": user,
+        "start_date": {"$lte": today},
+        "end_date": {"$gte": today}
+    }).sort("created_at", -1))
+    return targets
+
+def get_period_target_progress(target_plan, user):
+    """Calculate progress for a period target plan"""
+    start_date = datetime.fromisoformat(target_plan["start_date"]).date()
+    end_date = datetime.fromisoformat(target_plan["end_date"]).date()
+    today = datetime.now(IST).date()
+    
+    # Get all work sessions in the period
+    work_data = list(collection.find({
+        "type": "Pomodoro",
+        "pomodoro_type": "Work",
+        "user": user,
+        "date": {
+            "$gte": start_date.isoformat(),
+            "$lte": min(today, end_date).isoformat()
+        }
+    }))
+    
+    if not work_data:
+        return {}, 0, 0
+    
+    df_work = pd.DataFrame(work_data)
+    df_work["date"] = pd.to_datetime(df_work["date"]).dt.date
+    
+    # Calculate progress for each target
+    progress = {}
+    total_expected = 0
+    total_completed = 0
+    
+    days_elapsed = (min(today, end_date) - start_date).days + 1
+    
+    for target in target_plan["targets"]:
+        category = target["category"]
+        task = target["task"]
+        daily_sessions = target["daily_sessions"]
+        
+        # Filter sessions for this specific category-task combination
+        target_sessions = df_work[
+            (df_work["category"] == category) & 
+            (df_work["task"] == task)
+        ]
+        
+        completed_sessions = len(target_sessions)
+        expected_sessions = daily_sessions * days_elapsed
+        
+        progress[f"{category}:{task}"] = {
+            "category": category,
+            "task": task,
+            "daily_target": daily_sessions,
+            "expected": expected_sessions,
+            "completed": completed_sessions,
+            "percentage": (completed_sessions / max(1, expected_sessions)) * 100,
+            "remaining_daily": max(0, daily_sessions - len(target_sessions[target_sessions["date"] == today]))
+        }
+        
+        total_expected += expected_sessions
+        total_completed += completed_sessions
+    
+    overall_percentage = (total_completed / max(1, total_expected)) * 100
+    
+    return progress, overall_percentage, days_elapsed
+
+def render_period_targets_page():
+    """Render Weekly/21-Day Target Planning interface"""
+    st.header("🎯 Weekly/21-Day Target Planning")
+    
+    # Get active targets
+    active_targets = get_active_period_targets(st.session_state.user)
+    
+    # Display active plans
+    if active_targets:
+        st.markdown("### 📊 Active Plans")
+        
+        for plan in active_targets:
+            with st.expander(f"📋 {plan['plan_name']} ({plan['start_date']} to {plan['end_date']})", expanded=True):
+                progress, overall_pct, days_elapsed = get_period_target_progress(plan, st.session_state.user)
+                
+                # Overall progress
+                col1, col2, col3 = st.columns([2, 1, 1])
+                
+                with col1:
+                    st.markdown(f"**Overall Progress: {overall_pct:.1f}%**")
+                    st.progress(min(1.0, overall_pct / 100))
+                
+                with col2:
+                    st.metric("📅 Day", f"{days_elapsed}")
+                
+                with col3:
+                    total_days = (datetime.fromisoformat(plan['end_date']).date() - 
+                                datetime.fromisoformat(plan['start_date']).date()).days + 1
+                    st.metric("📊 Duration", f"{total_days} days")
+                
+                # Individual target progress
+                st.markdown("#### 🎯 Target Progress")
+                
+                for target_key, prog in progress.items():
+                    col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
+                    
+                    with col1:
+                        # Color-coded progress indicator
+                        if prog["percentage"] >= 100:
+                            status_color = "#10b981"
+                            status_icon = "✅"
+                        elif prog["percentage"] >= 80:
+                            status_color = "#3b82f6"
+                            status_icon = "🔵"
+                        elif prog["percentage"] >= 60:
+                            status_color = "#f59e0b"
+                            status_icon = "🟡"
+                        else:
+                            status_color = "#dc2626"
+                            status_icon = "🔴"
+                        
+                        st.markdown(f"""
+                        <div style="background: #f8fafc; border-left: 4px solid {status_color}; padding: 12px; margin: 4px 0; border-radius: 0 6px 6px 0;">
+                            <div style="font-weight: bold; color: #1f2937;">
+                                {status_icon} {prog['task']}
+                            </div>
+                            <div style="font-size: 0.85em; color: #6b7280;">
+                                📂 {prog['category']} • 🎯 {prog['daily_target']} sessions/day
+                            </div>
+                            <div style="margin-top: 6px;">
+                                <div style="background: #e5e7eb; border-radius: 10px; height: 8px; overflow: hidden;">
+                                    <div style="background: {status_color}; height: 100%; width: {min(100, prog['percentage']):.1f}%; transition: width 0.3s ease;"></div>
+                                </div>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    with col2:
+                        if prog["percentage"] >= 100:
+                            st.success(f"**{prog['percentage']:.0f}%**")
+                        elif prog["percentage"] >= 80:
+                            st.info(f"**{prog['percentage']:.0f}%**")
+                        elif prog["percentage"] >= 60:
+                            st.warning(f"**{prog['percentage']:.0f}%**")
+                        else:
+                            st.error(f"**{prog['percentage']:.0f}%**")
+                    
+                    with col3:
+                        st.markdown(f"**{prog['completed']}/{prog['expected']}**")
+                        st.caption("Completed")
+                    
+                    with col4:
+                        if prog["remaining_daily"] > 0:
+                            st.warning(f"**{prog['remaining_daily']}**")
+                            st.caption("Today remaining")
+                        else:
+                            st.success("**✓**")
+                            st.caption("Today done")
+        
+        st.divider()
+    
+    # Create new plan
+    st.markdown("### ➕ Create New Plan")
+    
+    with st.form("period_target_form", clear_on_submit=True):
+        col1, col2, col3 = st.columns([2, 1, 1])
+        
+        with col1:
+            plan_name = st.text_input("📋 Plan Name", placeholder="e.g., UGC NET Preparation Week 1")
+        
+        with col2:
+            period_type = st.selectbox("📅 Period Type", ["1 Week (7 days)", "3 Weeks (21 days)", "Custom"])
+        
+        with col3:
+            if period_type == "Custom":
+                custom_days = st.number_input("Days", min_value=1, max_value=90, value=7)
+            else:
+                custom_days = 7 if "1 Week" in period_type else 21
+        
+        # Date selection
+        col1, col2 = st.columns(2)
+        with col1:
+            start_date = st.date_input("🚀 Start Date", datetime.now(IST).date())
+        with col2:
+            if period_type == "Custom":
+                end_date = start_date + timedelta(days=custom_days - 1)
+            else:
+                end_date = start_date + timedelta(days=custom_days - 1)
+            st.date_input("🏁 End Date", end_date, disabled=True)
+        
+        # Dynamic target inputs
+        st.markdown("#### 🎯 Daily Targets")
+        st.markdown("Add your daily session targets for each category-task combination:")
+        
+        # Initialize session state for dynamic targets
+        if 'period_targets' not in st.session_state:
+            st.session_state.period_targets = [{"category": "", "task": "", "daily_sessions": 1}]
+        
+        # Add/Remove target buttons
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.form_submit_button("➕ Add Target", type="secondary"):
+                st.session_state.period_targets.append({"category": "", "task": "", "daily_sessions": 1})
+                st.rerun()
+        
+        with col2:
+            if len(st.session_state.period_targets) > 1:
+                if st.form_submit_button("➖ Remove Last", type="secondary"):
+                    st.session_state.period_targets.pop()
+                    st.rerun()
+        
+        # Target input fields
+        targets_data = []
+        categories = st.session_state.custom_categories + ["Other"]
+        
+        for i, target in enumerate(st.session_state.period_targets):
+            st.markdown(f"**Target {i+1}:**")
+            col1, col2, col3 = st.columns([2, 3, 1])
+            
+            with col1:
+                category = st.selectbox(
+                    f"Category {i+1}", 
+                    categories, 
+                    key=f"cat_{i}",
+                    index=categories.index(target["category"]) if target["category"] in categories else 0
+                )
+            
+            with col2:
+                task = st.text_input(
+                    f"Task {i+1}", 
+                    value=target["task"],
+                    placeholder="e.g., UGC NET Paper 1, SQL Projects",
+                    key=f"task_{i}"
+                )
+            
+            with col3:
+                daily_sessions = st.number_input(
+                    f"Sessions/day {i+1}", 
+                    min_value=1, 
+                    max_value=10, 
+                    value=target["daily_sessions"],
+                    key=f"sessions_{i}"
+                )
+            
+            if category and task:
+                targets_data.append({
+                    "category": category,
+                    "task": task,
+                    "daily_sessions": daily_sessions
+                })
+        
+        # Plan summary
+        if targets_data:
+            st.markdown("#### 📊 Plan Summary")
+            total_daily_sessions = sum(t["daily_sessions"] for t in targets_data)
+            total_period_sessions = total_daily_sessions * custom_days
+            total_hours = (total_period_sessions * 25) / 60
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("📅 Daily Sessions", total_daily_sessions)
+            with col2:
+                st.metric("🎯 Total Sessions", total_period_sessions)
+            with col3:
+                st.metric("⏰ Total Hours", f"{total_hours:.1f}h")
+            
+            # Target breakdown
+            st.markdown("**Daily Breakdown:**")
+            for target in targets_data:
+                daily_minutes = target["daily_sessions"] * 25
+                period_total = target["daily_sessions"] * custom_days
+                st.markdown(f"• **{target['task']}** ({target['category']}): {target['daily_sessions']} sessions/day ({daily_minutes}min) → {period_total} total sessions")
+        
+        # Save plan
+        submitted = st.form_submit_button("🚀 Create Plan", type="primary")
+        
+        if submitted:
+            if not plan_name.strip():
+                st.error("⚠️ Please enter a plan name")
+            elif not targets_data:
+                st.error("⚠️ Please add at least one target with valid category and task")
+            else:
+                save_period_target(
+                    plan_name.strip(),
+                    start_date.isoformat(),
+                    end_date.isoformat(),
+                    targets_data,
+                    st.session_state.user
+                )
+                st.session_state.period_targets = [{"category": "", "task": "", "daily_sessions": 1}]
+                st.success("✅ Plan created successfully!")
+                st.rerun()
+
 def render_notes_viewer_page():
     """Render notes viewing interface"""
     st.header("🗂️ Notes Viewer")
@@ -1571,6 +1882,8 @@ def main():
     # Route to appropriate page
     if st.session_state.page == "🎯 Focus Timer":
         render_focus_timer_page()
+    elif st.session_state.page == "📅 Period Targets":
+        render_period_targets_page()
     elif st.session_state.page == "📝 Notes Saver":
         render_notes_saver_page()
     elif st.session_state.page == "📊 Analytics":
