@@ -104,8 +104,7 @@ def init_session_state():
         "task": "",
         "custom_categories": ["Learning", "Development", "Research", "Planning"],
         "user": None,
-        "page": "🎯 Focus Timer",
-        "period_targets": [{"category": "", "task": "", "daily_sessions": 1}]
+        "page": "🎯 Focus Timer"
     }
     
     for key, value in defaults.items():
@@ -151,7 +150,7 @@ def render_header():
             st.rerun()
 
     with col_page:
-        pages = ["🎯 Focus Timer", "📅 Period Targets", "📝 Notes Saver", "📊 Analytics", "🗂️ Notes Viewer"]
+        pages = ["🎯 Focus Timer", "📝 Notes Saver", "📊 Analytics", "🗂️ Notes Viewer"]
         selected_page = st.selectbox("📍 Navigate", pages, 
                                    index=pages.index(st.session_state.page) if st.session_state.page in pages else 0)
         st.session_state.page = selected_page
@@ -541,316 +540,8 @@ def add_note(content, date, user):
     collection.update_one({"_id": note_id}, {"$set": note_doc}, upsert=True)
 
 # === PAGE COMPONENTS ===
-def generate_contribution_calendar(df):
-    """Generate GitHub-style contribution calendar data"""
-    today = datetime.now(IST).date()
-    
-    # Create 365-day grid data
-    calendar_data = []
-    for i in range(365):
-        check_date = today - timedelta(days=364-i)
-        
-        if df.empty:
-            day_sessions = 0
-        else:
-            day_data = df[(df["date"].dt.date == check_date) & (df["pomodoro_type"] == "Work")]
-            day_sessions = len(day_data)
-        
-        # Determine intensity level (0-4 like GitHub)
-        if day_sessions == 0:
-            intensity = 0
-        elif day_sessions == 1:
-            intensity = 1
-        elif day_sessions <= 3:
-            intensity = 2
-        elif day_sessions <= 5:
-            intensity = 3
-        else:
-            intensity = 4
-        
-        # Get weekday (0 = Monday, 6 = Sunday)
-        weekday = check_date.weekday()
-        
-        calendar_data.append({
-            'date': check_date,
-            'sessions': day_sessions,
-            'intensity': intensity,
-            'weekday': weekday,
-            'week': i // 7,
-            'day_name': check_date.strftime('%a'),
-            'month': check_date.strftime('%b'),
-            'day': check_date.day
-        })
-    
-    return calendar_data
-
-def render_contribution_heatmap(calendar_data):
-    """Render GitHub-style contribution heatmap"""
-    
-    # Color mapping for intensity levels
-    colors = {
-        0: "#ebedf0",  # No activity
-        1: "#9be9a8",  # Low activity
-        2: "#40c463",  # Medium-low activity
-        3: "#30a14e",  # Medium-high activity
-        4: "#216e39"   # High activity
-    }
-    
-    # Calculate total sessions for the year
-    total_sessions = sum(day['sessions'] for day in calendar_data)
-    active_days = len([day for day in calendar_data if day['sessions'] > 0])
-    
-    # Create the HTML for the contribution graph
-    html_content = f"""
-    <div style="background: white; padding: 20px; border-radius: 12px; border: 1px solid #e1e5e9; margin: 20px 0;">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-            <h3 style="margin: 0; color: #24292f;">📅 Focus Consistency (365 days)</h3>
-            <div style="font-size: 14px; color: #656d76;">
-                <strong>{total_sessions}</strong> sessions in the last year • <strong>{active_days}</strong> active days
-            </div>
-        </div>
-        
-        <div style="display: flex; align-items: center; gap: 12px;">
-            <!-- Month labels -->
-            <div style="width: 100%; overflow-x: auto;">
-                <div style="display: flex; margin-bottom: 8px; gap: 11px; font-size: 11px; color: #656d76;">
-    """
-    
-    # Add month labels
-    months_shown = set()
-    for week in range(0, 53):
-        week_start = min(week * 7, len(calendar_data) - 1)
-        if week_start < len(calendar_data):
-            month = calendar_data[week_start]['month']
-            if month not in months_shown:
-                html_content += f"<div style='width: 12px; text-align: center;'>{month}</div>"
-                months_shown.add(month)
-            else:
-                html_content += "<div style='width: 12px;'></div>"
-    
-    html_content += """
-                </div>
-                
-                <div style="display: flex; gap: 3px;">
-    """
-    
-    # Create the grid (53 weeks x 7 days)
-    for week in range(53):
-        html_content += "<div style='display: flex; flex-direction: column; gap: 3px;'>"
-        
-        for day in range(7):
-            day_index = week * 7 + day
-            if day_index < len(calendar_data):
-                day_data = calendar_data[day_index]
-                color = colors[day_data['intensity']]
-                
-                # Create tooltip text
-                sessions_text = f"{day_data['sessions']} session{'s' if day_data['sessions'] != 1 else ''}"
-                date_str = day_data['date'].strftime('%B %d, %Y')
-                
-                html_content += f"""
-                <div style="width: 12px; height: 12px; background-color: {color}; border-radius: 2px; 
-                           border: 1px solid rgba(1,4,9,0.1);"
-                     title="{sessions_text} on {date_str}">
-                </div>
-                """
-            else:
-                html_content += "<div style='width: 12px; height: 12px;'></div>"
-        
-        html_content += "</div>"
-    
-    html_content += """
-                </div>
-            </div>
-        </div>
-        
-        <!-- Legend -->
-        <div style="display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 16px; font-size: 12px; color: #656d76;">
-            <span>Less</span>
-    """
-    
-    # Add legend squares
-    for i in range(5):
-        color = colors[i]
-        html_content += f'<div style="width: 10px; height: 10px; background-color: {color}; border-radius: 2px; border: 1px solid rgba(1,4,9,0.1);"></div>'
-    
-    html_content += """
-            <span>More</span>
-        </div>
-    </div>
-    """
-    
-    return html_content
-
-def render_dashboard_metrics(df, today_progress, today_minutes):
-    """Render key dashboard metrics"""
-    today = datetime.now(IST).date()
-    
-    if df.empty:
-        metrics = {
-            'total_sessions': 0,
-            'total_hours': 0,
-            'current_streak': 0,
-            'best_streak': 0,
-            'weekly_avg': 0,
-            'monthly_total': 0
-        }
-    else:
-        df_work = df[df["pomodoro_type"] == "Work"]
-        
-        # Calculate metrics
-        total_sessions = len(df_work)
-        total_hours = df_work['duration'].sum() // 60
-        
-        # Streak calculations
-        daily_counts = df_work.groupby(df_work["date"].dt.date).size()
-        active_days = len(daily_counts)
-        min_sessions = 1 if active_days <= 12 else 2
-        
-        # Current streak
-        current_streak = 0
-        for i in range(365):
-            check_date = today - timedelta(days=i)
-            day_count = daily_counts.get(check_date, 0)
-            if day_count >= min_sessions:
-                current_streak += 1
-            else:
-                break
-        
-        # Best streak
-        best_streak = 0
-        temp_streak = 0
-        for i in range(365):
-            check_date = today - timedelta(days=364-i)
-            day_count = daily_counts.get(check_date, 0)
-            if day_count >= min_sessions:
-                temp_streak += 1
-                best_streak = max(best_streak, temp_streak)
-            else:
-                temp_streak = 0
-        
-        # Weekly average
-        last_4_weeks = df_work[df_work["date"] >= (today - timedelta(days=28))]
-        weekly_avg = len(last_4_weeks) / 4
-        
-        # Monthly total
-        this_month = df_work[df_work["date"].dt.month == today.month]
-        monthly_total = len(this_month)
-        
-        metrics = {
-            'total_sessions': total_sessions,
-            'total_hours': total_hours,
-            'current_streak': current_streak,
-            'best_streak': best_streak,
-            'weekly_avg': weekly_avg,
-            'monthly_total': monthly_total
-        }
-    
-    # Render metrics cards
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
-    
-    with col1:
-        streak_color = "#dc2626" if metrics['current_streak'] >= 7 else "#f59e0b" if metrics['current_streak'] >= 3 else "#3b82f6"
-        st.markdown(f"""
-        <div style="background: white; border: 1px solid {streak_color}; border-radius: 8px; padding: 16px; text-align: center;">
-            <div style="font-size: 2em; color: {streak_color};">🔥</div>
-            <div style="font-size: 1.5em; font-weight: bold; color: #1f2937; margin: 8px 0;">{metrics['current_streak']}</div>
-            <div style="font-size: 0.85em; color: #6b7280;">Current Streak</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown(f"""
-        <div style="background: white; border: 1px solid #10b981; border-radius: 8px; padding: 16px; text-align: center;">
-            <div style="font-size: 2em; color: #10b981;">🎯</div>
-            <div style="font-size: 1.5em; font-weight: bold; color: #1f2937; margin: 8px 0;">{metrics['total_sessions']}</div>
-            <div style="font-size: 0.85em; color: #6b7280;">Total Sessions</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col3:
-        st.markdown(f"""
-        <div style="background: white; border: 1px solid #3b82f6; border-radius: 8px; padding: 16px; text-align: center;">
-            <div style="font-size: 2em; color: #3b82f6;">⏰</div>
-            <div style="font-size: 1.5em; font-weight: bold; color: #1f2937; margin: 8px 0;">{metrics['total_hours']}h</div>
-            <div style="font-size: 0.85em; color: #6b7280;">Total Focus</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col4:
-        st.markdown(f"""
-        <div style="background: white; border: 1px solid #8b5cf6; border-radius: 8px; padding: 16px; text-align: center;">
-            <div style="font-size: 2em; color: #8b5cf6;">🏆</div>
-            <div style="font-size: 1.5em; font-weight: bold; color: #1f2937; margin: 8px 0;">{metrics['best_streak']}</div>
-            <div style="font-size: 0.85em; color: #6b7280;">Best Streak</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col5:
-        st.markdown(f"""
-        <div style="background: white; border: 1px solid #f59e0b; border-radius: 8px; padding: 16px; text-align: center;">
-            <div style="font-size: 2em; color: #f59e0b;">📊</div>
-            <div style="font-size: 1.5em; font-weight: bold; color: #1f2937; margin: 8px 0;">{metrics['weekly_avg']:.1f}</div>
-            <div style="font-size: 0.85em; color: #6b7280;">Weekly Avg</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col6:
-        st.markdown(f"""
-        <div style="background: white; border: 1px solid #06b6d4; border-radius: 8px; padding: 16px; text-align: center;">
-            <div style="font-size: 2em; color: #06b6d4;">📅</div>
-            <div style="font-size: 1.5em; font-weight: bold; color: #1f2937; margin: 8px 0;">{metrics['monthly_total']}</div>
-            <div style="font-size: 0.85em; color: #6b7280;">This Month</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-def render_active_targets_summary():
-    """Render summary of active period targets"""
-    active_targets = get_active_period_targets(st.session_state.user)
-    
-    if not active_targets:
-        return
-    
-    st.markdown("### 🎯 Active Period Targets")
-    
-    for plan in active_targets[:2]:  # Show max 2 active plans
-        progress, overall_pct, days_elapsed = get_period_target_progress(plan, st.session_state.user)
-        
-        # Compact progress display
-        col1, col2, col3 = st.columns([3, 1, 1])
-        
-        with col1:
-            progress_color = "#10b981" if overall_pct >= 80 else "#3b82f6" if overall_pct >= 60 else "#f59e0b"
-            
-            st.markdown(f"""
-            <div style="background: white; border-left: 4px solid {progress_color}; padding: 12px; border-radius: 0 6px 6px 0; border: 1px solid #e5e7eb;">
-                <div style="font-weight: bold; color: #1f2937; margin-bottom: 4px;">
-                    📋 {plan['plan_name']}
-                </div>
-                <div style="font-size: 0.9em; color: #6b7280; margin-bottom: 8px;">
-                    📅 {plan['start_date']} → {plan['end_date']} • Day {days_elapsed}
-                </div>
-                <div style="background: #f3f4f6; border-radius: 10px; height: 8px; overflow: hidden;">
-                    <div style="background: {progress_color}; height: 100%; width: {min(100, overall_pct):.1f}%; transition: width 0.3s ease;"></div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col2:
-            st.metric("Progress", f"{overall_pct:.0f}%")
-        
-        with col3:
-            total_targets = len(plan['targets'])
-            on_track = len([p for p in progress.values() if p['percentage'] >= 80])
-            st.metric("On Track", f"{on_track}/{total_targets}")
-    
-    # Quick link to targets page
-    if st.button("📊 View All Targets", key="view_targets_btn"):
-        st.session_state.page = "📅 Period Targets"
-        st.rerun()
-
 def render_focus_timer_page():
-    """Render the enhanced main dashboard page"""
+    """Render the main focus timer page"""
     df = get_user_data(st.session_state.user)
     
     # Check for active timer first
@@ -860,135 +551,117 @@ def render_focus_timer_page():
     # Get today's progress
     today_progress, adaptive_goal, today_minutes = render_daily_goal(df)
     
-    # === HERO SECTION ===
-    st.markdown("## 🚀 Focus Dashboard")
-    
-    # Generate and display contribution calendar
-    calendar_data = generate_contribution_calendar(df)
-    contribution_html = render_contribution_heatmap(calendar_data)
-    st.markdown(contribution_html, unsafe_allow_html=True)
-    
-    # === KEY METRICS ===
-    st.markdown("### 📊 Your Focus Journey")
-    render_dashboard_metrics(df, today_progress, today_minutes)
-    
+    # Daily Target Planner (main feature)
+    render_daily_target_planner(df, today_progress)
     st.divider()
     
-    # === TODAY'S PROGRESS & QUICK START ===
-    col_today, col_start = st.columns([1, 1])
+    # Quick start section
+    render_quick_start()
     
-    with col_today:
-        # Daily Target Planner (compact version)
-        render_daily_target_planner(df, today_progress)
-    
-    with col_start:
-        # Quick start section
-        render_quick_start()
-    
-    st.divider()
-    
-    # === ACTIVE TARGETS SUMMARY ===
-    render_active_targets_summary()
-    
-    # === RECENT ACTIVITY ===
+    # Enhanced Today's summary
     if not df.empty:
         st.divider()
-        st.markdown("### 📈 Recent Activity")
+        st.subheader("📊 Today's Summary")
         
-        # Last 7 days summary
         today = datetime.now(IST).date()
-        last_7_days = []
+        today_data = df[df["date"].dt.date == today]
+        breaks_today = len(today_data[today_data["pomodoro_type"] == "Break"])
         
-        for i in range(7):
-            day_date = today - timedelta(days=6-i)
-            day_data = df[(df["date"].dt.date == day_date) & (df["pomodoro_type"] == "Work")]
-            sessions = len(day_data)
-            minutes = day_data['duration'].sum() if not day_data.empty else 0
-            
-            last_7_days.append({
-                'date': day_date,
-                'day_name': day_date.strftime('%a'),
-                'sessions': sessions,
-                'minutes': minutes,
-                'is_today': day_date == today
-            })
-        
-        # Display 7-day chart
-        cols = st.columns(7)
-        for i, day in enumerate(last_7_days):
-            with cols[i]:
-                # Determine intensity color
-                if day['sessions'] == 0:
-                    color = "#ebedf0"
-                    text_color = "#6b7280"
-                elif day['sessions'] <= 2:
-                    color = "#9be9a8" 
-                    text_color = "#1f2937"
-                elif day['sessions'] <= 4:
-                    color = "#40c463"
-                    text_color = "#1f2937"
-                else:
-                    color = "#216e39"
-                    text_color = "white"
-                
-                border_style = "border: 2px solid #3b82f6;" if day['is_today'] else "border: 1px solid #e5e7eb;"
-                
-                st.markdown(f"""
-                <div style="background: {color}; {border_style} border-radius: 8px; padding: 12px; text-align: center; margin: 2px;">
-                    <div style="font-weight: bold; color: {text_color}; font-size: 0.9em;">{day['day_name']}</div>
-                    <div style="font-size: 1.2em; font-weight: bold; color: {text_color}; margin: 4px 0;">{day['sessions']}</div>
-                    <div style="font-size: 0.75em; color: {text_color};">{day['minutes']}m</div>
-                </div>
-                """, unsafe_allow_html=True)
-        
-        # Quick navigation to other features
-        st.divider()
-        st.markdown("### ⚡ Quick Actions")
-        
+        # Enhanced metrics with visual indicators
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            if st.button("📊 View Analytics", key="nav_analytics", use_container_width=True):
-                st.session_state.page = "📊 Analytics"
-                st.rerun()
-        
+            # Work sessions with progress indicator
+            current_target = get_daily_target(st.session_state.user)
+            target_val = current_target if current_target else adaptive_goal
+            
+            if today_progress >= target_val:
+                st.success("🎯 Work Sessions")
+                st.markdown(f"<h2 style='color: #10b981; margin: 0;'>{today_progress}</h2>", unsafe_allow_html=True)
+                st.markdown("✅ Target hit!")
+            elif today_progress > 0:
+                st.info("🎯 Work Sessions") 
+                st.markdown(f"<h2 style='color: #3b82f6; margin: 0;'>{today_progress}</h2>", unsafe_allow_html=True)
+                remaining = target_val - today_progress
+                st.markdown(f"🔥 {remaining} to go!")
+            else:
+                st.warning("🎯 Work Sessions")
+                st.markdown(f"<h2 style='color: #f59e0b; margin: 0;'>{today_progress}</h2>", unsafe_allow_html=True)
+                st.markdown("🚀 Let's start!")
+                
         with col2:
-            if st.button("🎯 Set Targets", key="nav_targets", use_container_width=True):
-                st.session_state.page = "📅 Period Targets"
-                st.rerun()
-        
+            # Focus minutes with time indicator
+            hours = today_minutes // 60
+            mins = today_minutes % 60
+            
+            if today_minutes >= 120:  # 2+ hours
+                st.success("⏱️ Focus Time")
+                if hours > 0:
+                    st.markdown(f"<h2 style='color: #10b981; margin: 0;'>{hours}h {mins}m</h2>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"<h2 style='color: #10b981; margin: 0;'>{mins}m</h2>", unsafe_allow_html=True)
+                st.markdown("🔥 Deep work!")
+            elif today_minutes >= 25:
+                st.info("⏱️ Focus Time")
+                if hours > 0:
+                    st.markdown(f"<h2 style='color: #3b82f6; margin: 0;'>{hours}h {mins}m</h2>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"<h2 style='color: #3b82f6; margin: 0;'>{mins}m</h2>", unsafe_allow_html=True)
+                st.markdown("💪 Building up!")
+            else:
+                st.warning("⏱️ Focus Time")
+                st.markdown(f"<h2 style='color: #f59e0b; margin: 0;'>{today_minutes}m</h2>", unsafe_allow_html=True)
+                st.markdown("⚡ Just started!")
+                
         with col3:
-            if st.button("📝 Save Notes", key="nav_notes", use_container_width=True):
-                st.session_state.page = "📝 Notes Saver"
-                st.rerun()
-        
+            # Break balance indicator
+            work_break_ratio = breaks_today / max(1, today_progress)
+            
+            if 0.3 <= work_break_ratio <= 0.7:  # Good balance
+                st.success("☕ Break Balance")
+                st.markdown(f"<h2 style='color: #10b981; margin: 0;'>{breaks_today}</h2>", unsafe_allow_html=True)
+                st.markdown("⚖️ Well balanced!")
+            elif work_break_ratio > 0.7:  # Too many breaks
+                st.warning("☕ Break Balance")
+                st.markdown(f"<h2 style='color: #f59e0b; margin: 0;'>{breaks_today}</h2>", unsafe_allow_html=True)
+                st.markdown("🎯 More focus!")
+            else:  # Too few breaks
+                st.info("☕ Break Balance")
+                st.markdown(f"<h2 style='color: #3b82f6; margin: 0;'>{breaks_today}</h2>", unsafe_allow_html=True)
+                st.markdown("🧘 Take breaks!")
+                
         with col4:
-            if st.button("🗂️ View Notes", key="nav_notes_view", use_container_width=True):
-                st.session_state.page = "🗂️ Notes Viewer"
-                st.rerun()
-    
-    else:
-        # Welcome message for new users
-        st.divider()
-        st.markdown("""
-        ### 🌟 Welcome to Your Focus Journey!
-        
-        Start your first Pomodoro session to begin tracking your consistency and building productive habits.
-        
-        **🎯 Quick Tips:**
-        - Set a daily target to stay motivated
-        - Take regular breaks to maintain focus
-        - Track your progress with our GitHub-style contribution graph
-        - Set weekly or monthly targets for bigger goals
-        """)
-        
-        # Motivational call-to-action
-        st.markdown(f"""
-        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 12px; text-align: center; margin: 20px 0;">
-            <h3 style="margin: 0 0 10px 0; color: white;">🚀 Ready to Start?</h3>
-            <p style="margin: 0; color: white;">Your focus journey begins with a single session. What will you work on first?</p>
-        </div>
-        """, unsafe_allow_html=True)
+            # Enhanced target status
+            current_target = get_daily_target(st.session_state.user)
+            
+            if current_target:
+                if today_progress >= current_target:
+                    if today_progress > current_target:
+                        st.success("🚀 Bonus Zone")
+                        bonus = today_progress - current_target
+                        st.markdown(f"<h2 style='color: #10b981; margin: 0;'>+{bonus}</h2>", unsafe_allow_html=True)
+                        st.markdown("🌟 Exceeding!")
+                    else:
+                        st.success("✅ Target Hit")
+                        st.markdown(f"<h2 style='color: #10b981; margin: 0;'>100%</h2>", unsafe_allow_html=True)
+                        st.markdown("🎯 Perfect!")
+                else:
+                    remaining = current_target - today_progress
+                    progress_pct = (today_progress / current_target) * 100
+                    st.info("🎯 Progress")
+                    st.markdown(f"<h2 style='color: #3b82f6; margin: 0;'>{progress_pct:.0f}%</h2>", unsafe_allow_html=True)
+                    st.markdown(f"⏳ {remaining} left!")
+            else:
+                if today_progress >= adaptive_goal:
+                    st.success("✅ Goal Hit")
+                    st.markdown(f"<h2 style='color: #10b981; margin: 0;'>100%</h2>", unsafe_allow_html=True)
+                    st.markdown("🎉 Adaptive goal!")
+                else:
+                    remaining = adaptive_goal - today_progress
+                    progress_pct = (today_progress / adaptive_goal) * 100 if adaptive_goal > 0 else 0
+                    st.info("🎯 Progress")
+                    st.markdown(f"<h2 style='color: #3b82f6; margin: 0;'>{progress_pct:.0f}%</h2>", unsafe_allow_html=True)
+                    st.markdown(f"⏳ {remaining} left!")
 
 def render_analytics_page():
     """Render analytics dashboard"""
@@ -1863,555 +1536,6 @@ def render_notes_saver_page():
             else:
                 st.warning("⚠️ Please add some content")
 
-def save_period_target(plan_name, start_date, end_date, targets, user):
-    """Save weekly/21-day target plan to database"""
-    plan_id = hashlib.sha256(f"{plan_name}_{start_date}_{user}".encode("utf-8")).hexdigest()
-    plan_doc = {
-        "_id": plan_id,
-        "type": "PeriodTarget",
-        "plan_name": plan_name,
-        "start_date": start_date,
-        "end_date": end_date,
-        "targets": targets,  # List of {category, task, daily_sessions}
-        "user": user,
-        "created_at": datetime.utcnow()
-    }
-    collection.update_one({"_id": plan_id}, {"$set": plan_doc}, upsert=True)
-
-def get_active_period_targets(user):
-    """Get active period targets for user"""
-    today = datetime.now(IST).date().isoformat()
-    targets = list(collection.find({
-        "type": "PeriodTarget",
-        "user": user,
-        "start_date": {"$lte": today},
-        "end_date": {"$gte": today}
-    }).sort("created_at", -1))
-    return targets
-
-def get_period_target_progress(target_plan, user):
-    """Calculate progress for a period target plan"""
-    start_date = datetime.fromisoformat(target_plan["start_date"]).date()
-    end_date = datetime.fromisoformat(target_plan["end_date"]).date()
-    today = datetime.now(IST).date()
-    
-    # Get all work sessions in the period
-    work_data = list(collection.find({
-        "type": "Pomodoro",
-        "pomodoro_type": "Work",
-        "user": user,
-        "date": {
-            "$gte": start_date.isoformat(),
-            "$lte": min(today, end_date).isoformat()
-        }
-    }))
-    
-    if not work_data:
-        return {}, 0, 0
-    
-    df_work = pd.DataFrame(work_data)
-    df_work["date"] = pd.to_datetime(df_work["date"]).dt.date
-    
-    # Calculate progress for each target
-    progress = {}
-    total_expected = 0
-    total_completed = 0
-    
-    days_elapsed = (min(today, end_date) - start_date).days + 1
-    
-    for target in target_plan["targets"]:
-        category = target["category"]
-        task = target["task"]
-        daily_sessions = target["daily_sessions"]
-        
-        # Filter sessions for this specific category-task combination
-        target_sessions = df_work[
-            (df_work["category"] == category) & 
-            (df_work["task"] == task)
-        ]
-        
-        completed_sessions = len(target_sessions)
-        expected_sessions = daily_sessions * days_elapsed
-        
-        progress[f"{category}:{task}"] = {
-            "category": category,
-            "task": task,
-            "daily_target": daily_sessions,
-            "expected": expected_sessions,
-            "completed": completed_sessions,
-            "percentage": (completed_sessions / max(1, expected_sessions)) * 100,
-            "remaining_daily": max(0, daily_sessions - len(target_sessions[target_sessions["date"] == today]))
-        }
-        
-        total_expected += expected_sessions
-        total_completed += completed_sessions
-    
-    overall_percentage = (total_completed / max(1, total_expected)) * 100
-    
-    return progress, overall_percentage, days_elapsed
-
-def render_period_targets_page():
-    """Render Weekly/21-Day Target Planning interface"""
-    st.header("🎯 Weekly/21-Day Target Planning")
-    
-    # Initialize period plan state
-    if 'period_plan' not in st.session_state:
-        st.session_state.period_plan = {
-            "name": "",
-            "start_date": datetime.now(IST).date(),
-            "duration_days": 7,
-            "targets": [],
-            "editing_target": None
-        }
-    
-    if 'temp_target' not in st.session_state:
-        st.session_state.temp_target = {
-            "category": "",
-            "task": "",
-            "daily_sessions": 1
-        }
-    
-    # Get active targets
-    active_targets = get_active_period_targets(st.session_state.user)
-    
-    # === ACTIVE PLANS SECTION ===
-    if active_targets:
-        st.markdown("### 📊 Active Plans")
-        
-        for plan in active_targets:
-            with st.expander(f"📋 {plan['plan_name']} ({plan['start_date']} to {plan['end_date']})", expanded=True):
-                progress, overall_pct, days_elapsed = get_period_target_progress(plan, st.session_state.user)
-                
-                # Overall progress
-                col1, col2, col3 = st.columns([2, 1, 1])
-                
-                with col1:
-                    st.markdown(f"**Overall Progress: {overall_pct:.1f}%**")
-                    st.progress(min(1.0, overall_pct / 100))
-                
-                with col2:
-                    st.metric("📅 Day", f"{days_elapsed}")
-                
-                with col3:
-                    total_days = (datetime.fromisoformat(plan['end_date']).date() - 
-                                datetime.fromisoformat(plan['start_date']).date()).days + 1
-                    st.metric("📊 Duration", f"{total_days} days")
-                
-                # Individual target progress
-                st.markdown("#### 🎯 Target Progress")
-                
-                for target_key, prog in progress.items():
-                    col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
-                    
-                    with col1:
-                        # Color-coded progress indicator
-                        if prog["percentage"] >= 100:
-                            status_color = "#10b981"
-                            status_icon = "✅"
-                        elif prog["percentage"] >= 80:
-                            status_color = "#3b82f6"
-                            status_icon = "🔵"
-                        elif prog["percentage"] >= 60:
-                            status_color = "#f59e0b"
-                            status_icon = "🟡"
-                        else:
-                            status_color = "#dc2626"
-                            status_icon = "🔴"
-                        
-                        st.markdown(f"""
-                        <div style="background: #f8fafc; border-left: 4px solid {status_color}; padding: 12px; margin: 4px 0; border-radius: 0 6px 6px 0;">
-                            <div style="font-weight: bold; color: #1f2937;">
-                                {status_icon} {prog['task']}
-                            </div>
-                            <div style="font-size: 0.85em; color: #6b7280;">
-                                📂 {prog['category']} • 🎯 {prog['daily_target']} sessions/day
-                            </div>
-                            <div style="margin-top: 6px;">
-                                <div style="background: #e5e7eb; border-radius: 10px; height: 8px; overflow: hidden;">
-                                    <div style="background: {status_color}; height: 100%; width: {min(100, prog['percentage']):.1f}%; transition: width 0.3s ease;"></div>
-                                </div>
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with col2:
-                        if prog["percentage"] >= 100:
-                            st.success(f"**{prog['percentage']:.0f}%**")
-                        elif prog["percentage"] >= 80:
-                            st.info(f"**{prog['percentage']:.0f}%**")
-                        elif prog["percentage"] >= 60:
-                            st.warning(f"**{prog['percentage']:.0f}%**")
-                        else:
-                            st.error(f"**{prog['percentage']:.0f}%**")
-                    
-                    with col3:
-                        st.markdown(f"**{prog['completed']}/{prog['expected']}**")
-                        st.caption("Completed")
-                    
-                    with col4:
-                        if prog["remaining_daily"] > 0:
-                            st.warning(f"**{prog['remaining_daily']}**")
-                            st.caption("Today remaining")
-                        else:
-                            st.success("**✓**")
-                            st.caption("Today done")
-        
-        st.divider()
-    
-    # === PLAN CREATION SECTION ===
-    st.markdown("### ➕ Create New Plan")
-    
-    # === PLAN METADATA ===
-    st.markdown("#### 📋 Plan Information")
-    
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        plan_name = st.text_input(
-            "Plan Name", 
-            value=st.session_state.period_plan["name"],
-            placeholder="e.g., UGC NET Preparation Week 1",
-            key="plan_name_input"
-        )
-        if plan_name != st.session_state.period_plan["name"]:
-            st.session_state.period_plan["name"] = plan_name
-    
-    with col2:
-        period_options = [
-            ("1 Week", 7),
-            ("3 Weeks", 21),
-            ("1 Month", 30),
-            ("Custom", 0)
-        ]
-        
-        period_labels = [opt[0] for opt in period_options]
-        current_duration = st.session_state.period_plan["duration_days"]
-        
-        # Find current selection
-        current_idx = 0
-        for i, (label, days) in enumerate(period_options):
-            if days == current_duration:
-                current_idx = i
-                break
-            elif label == "Custom":
-                current_idx = i
-        
-        selected_period = st.selectbox(
-            "Duration",
-            period_labels,
-            index=current_idx,
-            key="period_duration_select"
-        )
-        
-        selected_days = next(days for label, days in period_options if label == selected_period)
-        
-        if selected_period == "Custom":
-            custom_days = st.number_input(
-                "Custom Days", 
-                min_value=1, 
-                max_value=90, 
-                value=current_duration if current_duration not in [7, 21, 30] else 7,
-                key="custom_days_input"
-            )
-            st.session_state.period_plan["duration_days"] = custom_days
-        else:
-            st.session_state.period_plan["duration_days"] = selected_days
-    
-    # Date selection
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        start_date = st.date_input(
-            "🚀 Start Date", 
-            value=st.session_state.period_plan["start_date"],
-            key="plan_start_date"
-        )
-        st.session_state.period_plan["start_date"] = start_date
-    
-    with col2:
-        end_date = start_date + timedelta(days=st.session_state.period_plan["duration_days"] - 1)
-        st.date_input("🏁 End Date", value=end_date, disabled=True, key="plan_end_date_display")
-    
-    st.divider()
-    
-    # === TARGET MANAGEMENT ===
-    st.markdown("#### 🎯 Daily Targets")
-    
-    # Current targets display
-    if st.session_state.period_plan["targets"]:
-        st.markdown("**Current Targets:**")
-        
-        for i, target in enumerate(st.session_state.period_plan["targets"]):
-            col1, col2, col3, col4 = st.columns([2, 2, 1, 1])
-            
-            with col1:
-                st.markdown(f"📂 **{target['category']}**")
-            
-            with col2:
-                st.markdown(f"🎯 {target['task']}")
-            
-            with col3:
-                st.markdown(f"**{target['daily_sessions']}** sessions/day")
-            
-            with col4:
-                if st.button("🗑️", key=f"remove_target_{i}", help="Remove target"):
-                    st.session_state.period_plan["targets"].pop(i)
-                    st.rerun()
-        
-        st.divider()
-    
-    # === ADD NEW TARGET INTERFACE ===
-    st.markdown("**Add New Target:**")
-    
-    col1, col2, col3, col4 = st.columns([2, 3, 1, 1])
-    
-    with col1:
-        # Category selection with new category option
-        available_categories = st.session_state.custom_categories.copy()
-        
-        category_options = available_categories + ["+ Add New Category"]
-        
-        selected_category = st.selectbox(
-            "Category",
-            category_options,
-            key="new_target_category",
-            help="Select existing category or add a new one"
-        )
-        
-        if selected_category == "+ Add New Category":
-            new_category = st.text_input(
-                "New Category Name",
-                placeholder="Enter category name",
-                key="new_category_input"
-            )
-            
-            if new_category:
-                if st.button("➕ Add Category", key="add_category_btn", type="secondary"):
-                    if new_category.strip() and new_category.strip() not in st.session_state.custom_categories:
-                        st.session_state.custom_categories.append(new_category.strip())
-                        st.session_state.temp_target["category"] = new_category.strip()
-                        st.success(f"✅ Category '{new_category.strip()}' added!")
-                        st.rerun()
-                    else:
-                        st.warning("⚠️ Category already exists or is empty")
-                
-                st.session_state.temp_target["category"] = new_category.strip() if new_category.strip() else ""
-            else:
-                st.session_state.temp_target["category"] = ""
-        else:
-            st.session_state.temp_target["category"] = selected_category
-    
-    with col2:
-        task_input = st.text_input(
-            "Task",
-            value=st.session_state.temp_target["task"],
-            placeholder="e.g., UGC NET Paper 1, SQL Projects",
-            key="new_target_task"
-        )
-        st.session_state.temp_target["task"] = task_input
-    
-    with col3:
-        sessions_input = st.number_input(
-            "Sessions/day",
-            min_value=1,
-            max_value=10,
-            value=st.session_state.temp_target["daily_sessions"],
-            key="new_target_sessions"
-        )
-        st.session_state.temp_target["daily_sessions"] = sessions_input
-    
-    with col4:
-        # Add target button
-        can_add_target = (
-            st.session_state.temp_target["category"] and 
-            st.session_state.temp_target["category"] != "+ Add New Category" and
-            st.session_state.temp_target["task"].strip()
-        )
-        
-        if st.button(
-            "➕ Add Target", 
-            key="add_target_btn", 
-            type="primary",
-            disabled=not can_add_target
-        ):
-            # Check for duplicates
-            existing_tasks = [
-                (t["category"], t["task"]) 
-                for t in st.session_state.period_plan["targets"]
-            ]
-            
-            new_combo = (
-                st.session_state.temp_target["category"], 
-                st.session_state.temp_target["task"].strip()
-            )
-            
-            if new_combo not in existing_tasks:
-                st.session_state.period_plan["targets"].append({
-                    "category": st.session_state.temp_target["category"],
-                    "task": st.session_state.temp_target["task"].strip(),
-                    "daily_sessions": st.session_state.temp_target["daily_sessions"]
-                })
-                
-                # Reset temp target
-                st.session_state.temp_target = {
-                    "category": "",
-                    "task": "",
-                    "daily_sessions": 1
-                }
-                
-                st.success("✅ Target added!")
-                st.rerun()
-            else:
-                st.error("⚠️ This category-task combination already exists")
-        
-        if not can_add_target:
-            if not st.session_state.temp_target["category"]:
-                st.caption("⚠️ Select category")
-            elif not st.session_state.temp_target["task"].strip():
-                st.caption("⚠️ Enter task")
-    
-    st.divider()
-    
-    # === PLAN SUMMARY ===
-    if st.session_state.period_plan["targets"] and st.session_state.period_plan["name"].strip():
-        st.markdown("#### 📊 Plan Summary")
-        
-        targets = st.session_state.period_plan["targets"]
-        duration = st.session_state.period_plan["duration_days"]
-        
-        total_daily_sessions = sum(t["daily_sessions"] for t in targets)
-        total_period_sessions = total_daily_sessions * duration
-        total_hours = (total_period_sessions * 25) / 60
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.metric("📅 Daily Sessions", total_daily_sessions)
-        
-        with col2:
-            st.metric("🎯 Total Sessions", total_period_sessions)
-        
-        with col3:
-            st.metric("⏰ Total Hours", f"{total_hours:.1f}h")
-        
-        # Detailed breakdown
-        st.markdown("**Target Breakdown:**")
-        
-        for target in targets:
-            daily_minutes = target["daily_sessions"] * 25
-            period_total = target["daily_sessions"] * duration
-            
-            st.markdown(f"""
-            <div style="background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px; margin: 6px 0;">
-                <div style="font-weight: bold; color: #1f2937; margin-bottom: 4px;">
-                    🎯 {target['task']} <span style="color: #6b7280;">({target['category']})</span>
-                </div>
-                <div style="font-size: 0.9em; color: #6b7280;">
-                    📅 {target['daily_sessions']} sessions/day ({daily_minutes}min/day) → 
-                    🎯 {period_total} total sessions ({period_total * 25}min total)
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        st.divider()
-        
-        # === CREATE PLAN BUTTON ===
-        col1, col2, col3 = st.columns([1, 2, 1])
-        
-        with col2:
-            if st.button("🚀 Create Plan", key="create_plan_btn", type="primary", use_container_width=True):
-                # Validate plan
-                if not st.session_state.period_plan["name"].strip():
-                    st.error("⚠️ Please enter a plan name")
-                elif not st.session_state.period_plan["targets"]:
-                    st.error("⚠️ Please add at least one target")
-                else:
-                    # Save plan
-                    save_period_target(
-                        st.session_state.period_plan["name"].strip(),
-                        st.session_state.period_plan["start_date"].isoformat(),
-                        end_date.isoformat(),
-                        st.session_state.period_plan["targets"],
-                        st.session_state.user
-                    )
-                    
-                    # Reset plan state
-                    st.session_state.period_plan = {
-                        "name": "",
-                        "start_date": datetime.now(IST).date(),
-                        "duration_days": 7,
-                        "targets": [],
-                        "editing_target": None
-                    }
-                    
-                    st.session_state.temp_target = {
-                        "category": "",
-                        "task": "",
-                        "daily_sessions": 1
-                    }
-                    
-                    st.success("✅ Plan created successfully!")
-                    st.rerun()
-    
-    else:
-        # Call to action
-        missing_items = []
-        if not st.session_state.period_plan["name"].strip():
-            missing_items.append("plan name")
-        if not st.session_state.period_plan["targets"]:
-            missing_items.append("targets")
-        
-        if missing_items:
-            st.info(f"📝 Please add: {', '.join(missing_items)} to create your plan")
-        
-        # Show example or help
-        with st.expander("💡 How to create a plan"):
-            st.markdown("""
-            **Steps to create your period target plan:**
-            
-            1. **📋 Plan Information**: Enter a descriptive name and select duration
-            2. **🎯 Add Targets**: For each area you want to focus on:
-               - Select or create a category (e.g., "Learning", "Projects")  
-               - Enter specific task (e.g., "UGC NET Paper 1", "SQL Practice")
-               - Set daily sessions target (how many 25min sessions per day)
-            3. **📊 Review Summary**: Check your plan before creating
-            4. **🚀 Create Plan**: Your plan will become active immediately
-            
-            **Example Plan: "UGC NET Preparation Week"**
-            - 🎯 UGC NET Paper 1 (Learning): 1 session/day  
-            - 🎯 UGC NET Paper 2 (Learning): 1 session/day
-            - 🎯 SQL Projects (Development): 1 session/day
-            - 🎯 Practice Tests (Practice): 1 session/day
-            
-            **Total**: 4 sessions/day (100 min/day) = 700 minutes/week
-            """)
-        
-        # Quick start templates
-        with st.expander("🚀 Quick Start Templates"):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                if st.button("📚 Study Week Template", key="study_template"):
-                    st.session_state.period_plan["name"] = "Study Week"
-                    st.session_state.period_plan["duration_days"] = 7
-                    st.session_state.period_plan["targets"] = [
-                        {"category": "Learning", "task": "Main Subject", "daily_sessions": 2},
-                        {"category": "Learning", "task": "Practice Problems", "daily_sessions": 1},
-                        {"category": "Research", "task": "Additional Reading", "daily_sessions": 1}
-                    ]
-                    st.rerun()
-            
-            with col2:
-                if st.button("💼 Project Sprint Template", key="project_template"):
-                    st.session_state.period_plan["name"] = "Project Sprint"
-                    st.session_state.period_plan["duration_days"] = 21
-                    st.session_state.period_plan["targets"] = [
-                        {"category": "Development", "task": "Core Features", "daily_sessions": 2},
-                        {"category": "Development", "task": "Testing", "daily_sessions": 1},
-                        {"category": "Planning", "task": "Documentation", "daily_sessions": 1}
-                    ]
-                    st.rerun()
-
 def render_notes_viewer_page():
     """Render notes viewing interface"""
     st.header("🗂️ Notes Viewer")
@@ -2447,8 +1571,6 @@ def main():
     # Route to appropriate page
     if st.session_state.page == "🎯 Focus Timer":
         render_focus_timer_page()
-    elif st.session_state.page == "📅 Period Targets":
-        render_period_targets_page()
     elif st.session_state.page == "📝 Notes Saver":
         render_notes_saver_page()
     elif st.session_state.page == "📊 Analytics":
