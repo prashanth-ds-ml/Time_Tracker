@@ -102,7 +102,7 @@ def init_session_state():
         "is_break": False,
         "category": "",
         "task": "",
-        "custom_categories": ["Learning", "Development", "Research", "Planning"],
+        "custom_categories": ["Learning", "Projects", "Research", "Planning"],
         "user": None,
         "page": "🎯 Focus Timer"
     }
