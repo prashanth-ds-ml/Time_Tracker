@@ -318,7 +318,7 @@ def render_weekly_planner():
     with st.expander("➕ Add or Update Goal", expanded=False):
         g_title = st.text_input("Title", placeholder="e.g., UGC NET Paper 1")
         g_type = st.selectbox("Type", ["Certification","Portfolio","Job Prep","Research","Startup","Learning","Other"], index=0)
-        g_weight = st.select_slider("Priority Weight", options=[1,2,3], value=2, help="High=3, Medium=2, Low=1")
+        g_weight = st.select_slider("Priority Weight", options=[1,2,3,4,5], value=2, help="High=3, Medium=2, Low=1")
         g_status = st.selectbox("Status", ["New","In Progress","Completed","On Hold","Archived"], index=0)
         if st.button("💾 Save Goal"):
             if g_title.strip():
