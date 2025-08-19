@@ -69,6 +69,18 @@ def current_week_id(d: Optional[date] = None) -> str:
     start, _ = week_bounds_ist(d)
     return f"{start.isoformat()}"
 
+def week_day_counts(week_start: date) -> Tuple[int, int]:
+    """Return (#weekdays, #weekend_days) for the given Monday-start week."""
+    wd = 0
+    we = 0
+    for i in range(7):
+        day = week_start + timedelta(days=i)
+        if day.weekday() < 5:
+            wd += 1
+        else:
+            we += 1
+    return wd, we
+
 # === DATA ACCESS / CACHES ===
 @st.cache_data(ttl=300)
 def get_user_sessions(username: str) -> pd.DataFrame:
@@ -88,7 +100,6 @@ def get_user_sessions(username: str) -> pd.DataFrame:
         df['pomodoro_type'] = 'Work'
     return df
 
-# compat wrapper for original analytics
 @st.cache_data(ttl=300)
 def get_user_data(username: str) -> pd.DataFrame:
     return get_user_sessions(username)
@@ -180,7 +191,8 @@ def get_or_create_weekly_plan(username: str, d: Optional[date] = None) -> Dict:
     if plan:
         return plan
     settings = get_user_settings(username)
-    total_poms = compute_weekly_capacity(settings)
+    wd, we = week_day_counts(start)
+    total_poms = compute_weekly_capacity(settings, weekdays=wd, weekend_days=we)
     doc = {
         "_id": pid,
         "user": username,
@@ -249,6 +261,9 @@ def save_pomodoro_session(user: str, is_break: bool, duration: int, goal_id: Opt
         "created_at": datetime.utcnow()
     }
     collection_logs.insert_one(doc)
+    # increment goal progress if applicable (work only)
+    if (not is_break) and goal_id:
+        collection_goals.update_one({"_id": goal_id}, {"$inc": {"poms_completed": 1}, "$set": {"updated_at": datetime.utcnow()}})
     get_user_sessions.clear()
 
 # === DAILY TARGETS — CORE (early) ===
@@ -329,6 +344,9 @@ def init_session_state():
         "active_goal_id": None,
         "active_goal_title": "",
         "custom_categories": ["Learning", "Projects", "Research", "Planning"],
+        # new: which week we're planning/reviewing (defaults to current date)
+        "planning_week_date": now_ist().date(),
+        "review_week_date": now_ist().date(),
     }
     for k,v in defaults.items():
         if k not in st.session_state:
@@ -336,8 +354,33 @@ def init_session_state():
 
 init_session_state()
 
+# === OPTIONAL: ADMIN / UTIL ===
+def ensure_indexes():
+    try:
+        collection_logs.create_index([("user",1),("type",1),("date",1)], name="user_type_date")
+        collection_logs.create_index([("goal_id",1)], name="goal_id")
+        collection_goals.create_index([("user",1),("title",1)], unique=True, name="user_title_unique")
+        collection_plans.create_index([("user",1),("week_start",1)], name="user_week")
+        collection_reflections.create_index([("user",1),("date",1)], name="user_date")
+        st.success("Indexes ensured/created (if not present).")
+    except Exception as e:
+        st.warning(f"Index creation notice: {e}")
+
+def export_sessions_csv(user: str):
+    df = get_user_sessions(user)
+    if df.empty:
+        st.info("No sessions to export.")
+        return
+    out = df.sort_values("date")
+    st.download_button("⬇️ Export Sessions (CSV)", out.to_csv(index=False).encode("utf-8"), file_name=f"{user}_sessions.csv", mime="text/csv")
+
 # === HEADER ===
 def render_header():
+    st.sidebar.markdown("### ⚙️ Admin")
+    if st.sidebar.button("Initialize Mongo Indexes"):
+        ensure_indexes()
+    export_sessions_csv(st.session_state.user if st.session_state.user else "user")
+
     users = get_all_users()
     if not users:
         add_user("prashanth")
@@ -379,8 +422,16 @@ def render_weekly_planner():
     st.header("📅 Weekly Goal Planner")
 
     user = st.session_state.user
+    # Week picker
+    pick_date = st.date_input("📆 Plan for week of", value=st.session_state.planning_week_date)
+    # normalize to Monday
+    week_start, week_end = week_bounds_ist(pick_date)
+    if pick_date != st.session_state.planning_week_date:
+        st.session_state.planning_week_date = pick_date
+        st.rerun()
+
     settings = get_user_settings(user)
-    plan = get_or_create_weekly_plan(user)
+    plan = get_or_create_weekly_plan(user, week_start)
 
     colA, colB, colC = st.columns(3)
     with colA:
@@ -388,14 +439,14 @@ def render_weekly_planner():
     with colB:
         we = st.number_input("Avg Pomodoros / Weekend Day", 0, 12, value=settings["weekend_poms"])
     with colC:
-        total = compute_weekly_capacity({"weekday_poms": wp, "weekend_poms": we})
-        st.metric("Estimated Weekly Capacity", f"{total}")
+        wd_count, we_count = week_day_counts(week_start)
+        total = compute_weekly_capacity({"weekday_poms": wp, "weekend_poms": we}, weekdays=wd_count, weekend_days=we_count)
+        st.metric(f"Weekly Capacity ({week_start} → {week_end})", f"{total}")
         if (wp != settings["weekday_poms"]) or (we != settings["weekend_poms"]):
             if st.button("💾 Save Capacity", use_container_width=True):
                 users_collection.update_one({"username": user}, {"$set": {"weekday_poms": int(wp), "weekend_poms": int(we)}})
                 get_user_settings.clear()
-                get_or_create_weekly_plan(user)  # refresh defaults
-                st.success("Updated!")
+                st.success("Updated user defaults")
                 st.rerun()
 
     st.divider()
@@ -427,17 +478,28 @@ def render_weekly_planner():
     st.divider()
 
     st.subheader("🧮 Auto-Allocate Weekly Pomodoros")
-    total_poms = compute_weekly_capacity(get_user_settings(user))
+    wd_count, we_count = week_day_counts(week_start)
+    total_poms = compute_weekly_capacity(get_user_settings(user), weekdays=wd_count, weekend_days=we_count)
     weight_map = {row["_id"]: int(row["priority_weight"]) for _, row in goals_df.iterrows()}
     auto = proportional_allocation(total_poms, weight_map)
     st.caption("Adjust numbers to fine-tune allocations (sum preserved).")
+
+    # if plan is empty, offer to copy last week's plan
+    prev_start = week_start - timedelta(days=7)
+    prev_plan = collection_plans.find_one({"_id": f"{user}|{prev_start.isoformat()}"})
+    if (not plan.get("allocations")) and prev_plan and prev_plan.get("allocations"):
+        if st.button(f"📋 Copy last week's plan ({prev_start} → {prev_start+timedelta(days=6)})"):
+            save_plan_allocations(plan["_id"], list(prev_plan["allocations"].keys()), prev_plan["allocations"])
+            st.success("Copied last week's plan")
+            st.rerun()
 
     edited = {}
     cols = st.columns(min(4, len(auto)) if len(auto) > 0 else 1)
     i = 0
     for _, row in goals_df.iterrows():
         with cols[i % len(cols)]:
-            val = st.number_input(f"{row['title']}", min_value=0, max_value=total_poms, value=int(auto[row['_id']]), step=1, key=f"alloc_{row['_id']}")
+            default_val = int(plan.get("allocations", {}).get(row['_id'], auto[row['_id']]))
+            val = st.number_input(f"{row['title']}", min_value=0, max_value=total_poms, value=default_val, step=1, key=f"alloc_{row['_id']}")
             edited[row["_id"]] = int(val)
         i += 1
 
@@ -499,7 +561,8 @@ def render_focus_timer():
         return
 
     user = st.session_state.user
-    plan = get_or_create_weekly_plan(user)
+    # Focus Timer always uses the *current week* for locking/context
+    plan = get_or_create_weekly_plan(user, now_ist().date())
 
     # Daily Target Planner (top)
     df_all = get_user_sessions(user)
@@ -657,20 +720,28 @@ def render_reflection_page():
 def render_weekly_review():
     st.header("🧭 Weekly Review & Transition")
     user = st.session_state.user
-    plan = get_or_create_weekly_plan(user)
 
-    st.subheader("Plan vs Actual")
+    # Week picker for review
+    pick_date = st.date_input("📆 Review week of", value=st.session_state.review_week_date, key="review_week_picker")
+    week_start, week_end = week_bounds_ist(pick_date)
+    if pick_date != st.session_state.review_week_date:
+        st.session_state.review_week_date = pick_date
+        st.rerun()
+
+    plan = get_or_create_weekly_plan(user, week_start)
+
+    st.subheader(f"Plan vs Actual  ({week_start} → {week_end})")
     df = get_user_sessions(user)
     if df.empty:
         st.info("No sessions yet.")
         return
-    start = datetime.fromisoformat(plan['week_start']).date()
-    end = datetime.fromisoformat(plan['week_end']).date()
+    start = week_start
+    end = week_end
     mask_week = (df['date'].dt.date>=start) & (df['date'].dt.date<=end) & (df['pomodoro_type']=="Work")
     dfw = df[mask_week]
 
     if dfw.empty:
-        st.info("No work sessions this week yet.")
+        st.info("No work sessions in this week.")
         return
 
     def title_of(gid):
@@ -714,15 +785,15 @@ def render_weekly_review():
             with col1:
                 st.write(f"**{row['title']}**")
             with col2:
-                status = st.selectbox("Status", ["Completed","Rollover","On Hold","Archived","In Progress"], index=4, key=f"close_{gid}")
+                status = st.selectbox("Status", ["Completed","Rollover","On Hold","Archived","In Progress"], index=4, key=f"close_{gid}_{week_start}")
             with col3:
                 carry = max(0, int(row['planned']) - int(row['actual']))
-                carry = st.number_input("Carry fwd poms", 0, 200, value=carry, key=f"carry_{gid}")
+                carry = st.number_input("Carry fwd poms", 0, 200, value=carry, key=f"carry_{gid}_{week_start}")
             with col4:
-                if st.button("✅ Apply", key=f"apply_{gid}"):
+                if st.button("✅ Apply", key=f"apply_{gid}_{week_start}"):
                     collection_goals.update_one({"_id": gid}, {"$set": {"status": "Completed" if status=="Completed" else ("On Hold" if status=="On Hold" else ("Archived" if status=="Archived" else "In Progress"))}})
                     if status=="Rollover" and carry>0:
-                        next_start = datetime.fromisoformat(plan['week_start']).date() + timedelta(days=7)
+                        next_start = week_start + timedelta(days=7)
                         next_plan = get_or_create_weekly_plan(user, next_start)
                         next_alloc = next_plan.get('allocations', {})
                         next_goals = set(next_plan.get('goals', []))
@@ -733,7 +804,6 @@ def render_weekly_review():
 
 # === ANALYTICS (rich) ===
 def render_analytics_page():
-    """Rich analytics from your original app, compatible with goals via 'category' label."""
     st.header("📊 Analytics Dashboard")
     df = get_user_data(st.session_state.user)
     if df.empty:
@@ -742,7 +812,6 @@ def render_analytics_page():
     df_work = df[df["pomodoro_type"] == "Work"]
     today = now_ist().date()
 
-    # Key metrics
     st.subheader("📈 Overview")
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -760,7 +829,6 @@ def render_analytics_page():
 
     st.divider()
 
-    # Daily performance chart (Last 30d)
     st.subheader("📈 Daily Performance (Last 30 Days)")
     daily_data = []
     for i in range(30):
@@ -773,7 +841,6 @@ def render_analytics_page():
         fig.update_layout(height=400, showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
 
-    # Time Investment Analysis
     st.divider(); st.subheader("🎯 Time Investment Analysis")
     col_filter1, _, _ = st.columns(3)
     with col_filter1:
@@ -790,7 +857,6 @@ def render_analytics_page():
         st.info(f"📊 No data available for {time_filter.lower()}")
         return
 
-    # Category Deep Dive (we use 'category' which is the goal title when present)
     st.markdown("### 📂 Category Deep Dive")
     category_stats = filtered_work.groupby('category').agg({'duration': ['sum', 'count', 'mean']}).round(1)
     category_stats.columns = ['total_minutes', 'sessions', 'avg_session']
@@ -823,7 +889,6 @@ def render_analytics_page():
         perf_df = pd.DataFrame(performance_data)
         st.dataframe(perf_df, use_container_width=True, hide_index=True, height=min(len(perf_df)*35+38, 300))
 
-    # Task Performance Analysis
     st.markdown("### 🎯 Task Performance Analysis")
     task_stats = filtered_work.groupby(['category','task']).agg({'duration':['sum','count','mean']}).round(1)
     task_stats.columns = ['total_minutes','sessions','avg_session']
@@ -848,7 +913,6 @@ def render_analytics_page():
             else:
                 st.success("✅ Time is well distributed across tasks.")
 
-    # Weekly trends (stacked by category)
     if time_filter != "Last 7 days" and len(filtered_work) > 7:
         st.markdown("### 📊 Weekly Category Trends")
         filtered_work = filtered_work.copy()
@@ -860,7 +924,6 @@ def render_analytics_page():
             fig_weekly.update_layout(height=350, xaxis_title="Week", yaxis_title="Time (minutes)", title_x=0.5, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
             st.plotly_chart(fig_weekly, use_container_width=True)
 
-    # Streak / consistency
     st.divider(); st.subheader("🔥 Consistency Tracking")
     daily_counts = df_work.groupby(df_work["date"].dt.date).size()
     active_days = len(daily_counts)
@@ -930,6 +993,48 @@ def render_notes_viewer():
         st.info("No notes in this range")
 
 # === MAIN ===
+def render_header():
+    st.sidebar.markdown("### ⚙️ Admin")
+    if st.sidebar.button("Initialize Mongo Indexes"):
+        ensure_indexes()
+    export_sessions_csv(st.session_state.user if st.session_state.user else "user")
+
+    users = get_all_users()
+    if not users:
+        add_user("prashanth")
+        users = ["prashanth"]
+    if st.session_state.user not in users:
+        st.session_state.user = users[0]
+
+    c1, c2, c3 = st.columns([2,3,2])
+    with c1:
+        idx = users.index(st.session_state.user) if st.session_state.user in users else 0
+        sel = st.selectbox("👤 User", users, index=idx, key="user_select")
+        if sel != st.session_state.user:
+            st.session_state.user = sel
+            st.rerun()
+    with c2:
+        pages = [
+            "🎯 Focus Timer",
+            "📅 Weekly Planner",
+            "🧠 Reflection",
+            "🧭 Weekly Review",
+            "📊 Analytics",
+            "📝 Notes Saver",
+            "🗂️ Notes Viewer",
+        ]
+        st.session_state.page = st.selectbox("📍 Navigate", pages, index=pages.index(st.session_state.page) if st.session_state.page in pages else 0)
+    with c3:
+        with st.expander("➕ Add User"):
+            u = st.text_input("Username", key="new_user_input")
+            if st.button("Add", key="add_user_btn") and u:
+                if add_user(u.strip()):
+                    st.session_state.user = u.strip()
+                    st.success("✅ User added!")
+                    st.rerun()
+                else:
+                    st.warning("User already exists!")
+
 def main():
     render_header()
     st.divider()
