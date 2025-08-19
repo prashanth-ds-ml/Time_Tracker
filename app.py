@@ -20,7 +20,7 @@ st.set_page_config(
 POMODORO_MIN = 25
 BREAK_MIN = 5
 IST = pytz.timezone('Asia/Kolkata')
-SOUND_PATH = "https://github.com/prashanth-ds-ml/Time_Tracker/raw/refs/heads/main/one_piece_overtake.mp3"
+SOUND_PATH = "https://github.com/prashanth-ds-ml/Time_Tracker/blob/main/one_piece_overtake.mp3"
 
 # === DB INIT ===
 
