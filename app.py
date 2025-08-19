@@ -252,6 +252,79 @@ def save_pomodoro_session(user: str, is_break: bool, duration: int, goal_id: Opt
     # invalidate caches
     get_user_sessions.clear()
 
+# === DAILY TARGETS — CORE (early) ===
+
+def get_adaptive_goal(active_days:int):
+    if active_days <= 5:
+        return 1, "🌱 Building", "Start small - consistency over intensity"
+    elif active_days <= 12:
+        return 2, "🔥 Growing", "Building momentum - you're doing great!"
+    elif active_days <= 19:
+        return 3, "💪 Strong", "Push your limits - you're in the zone!"
+    else:
+        return 4, "🚀 Peak", "Excellence mode - maintain this peak!"
+
+
+def save_daily_target(target:int, user:str):
+    today = now_ist().date().isoformat()
+    target_doc = {"type":"DailyTarget","date": today, "target": int(target), "user": user, "created_at": datetime.utcnow()}
+    collection_logs.update_one({"type":"DailyTarget","date": today,"user": user},{"$set": target_doc}, upsert=True)
+
+
+def get_daily_target(user:str):
+    today = now_ist().date().isoformat()
+    doc = collection_logs.find_one({"type":"DailyTarget","date": today,"user": user})
+    return int(doc["target"]) if doc else None
+
+
+def render_daily_goal(df: pd.DataFrame):
+    if df.empty:
+        return 0, 1, 0
+    today = now_ist().date()
+    df_work = df[df["pomodoro_type"]=="Work"]
+    work_today = df_work[df_work["date"].dt.date==today]
+    active_days = len(df_work.groupby(df_work["date"].dt.date).size())
+    today_progress = len(work_today)
+    today_minutes = int(work_today['duration'].sum())
+    adaptive_goal, _, _ = get_adaptive_goal(active_days)
+    return today_progress, adaptive_goal, today_minutes
+
+
+def render_daily_target_planner(df: pd.DataFrame, today_progress: int):
+    st.markdown("## 🎯 Daily Target Planner")
+    current_target = get_daily_target(st.session_state.user)
+    if df.empty:
+        suggested_target, phase_name, _ = 1, "🌱 Building", ""
+    else:
+        df_work = df[df["pomodoro_type"]=="Work"]
+        active_days = len(df_work.groupby(df_work["date"].dt.date).size())
+        suggested_target, phase_name, _ = get_adaptive_goal(active_days)
+    col1, col2 = st.columns([2,3])
+    with col1:
+        st.markdown("### 📋 Set Your Target")
+        if current_target:
+            st.info(f"✅ Today's target: **{current_target} Pomodoros**")
+            with st.expander("🔄 Change Today's Target"):
+                new_target = st.number_input("New target", 1, 12, value=int(current_target))
+                if st.button("💾 Update Target"):
+                    save_daily_target(int(new_target), st.session_state.user)
+                    st.success("🎯 Target updated!")
+                    st.rerun()
+        else:
+            st.markdown(f"💡 **Suggested:** {suggested_target} Pomodoros ({phase_name})")
+            target_input = st.number_input("How many Pomodoros today?", 1, 12, value=int(suggested_target))
+            if st.button("🎯 Set Daily Target", use_container_width=True):
+                save_daily_target(int(target_input), st.session_state.user)
+                st.success("✅ Daily target set!")
+                st.rerun()
+    with col2:
+        if current_target is not None:
+            remaining = max(0, int(current_target) - today_progress)
+            pct = min(100.0, (today_progress / max(1,int(current_target))) * 100)
+            st.progress(pct/100.0, text=f"🎯 {pct:.0f}% Complete")
+        else:
+            st.info("Set a target to unlock enhanced tracking.")
+
 # === SESSION STATE ===
 def init_session_state():
     defaults = {
