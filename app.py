@@ -98,6 +98,13 @@ def get_user_sessions(username: str) -> pd.DataFrame:
         df['category'] = ''
     if 'pomodoro_type' not in df.columns:
         df['pomodoro_type'] = 'Work'
+    # Backfill work_stream_type from presence of goal_id
+    if 'work_stream_type' not in df.columns:
+        df['work_stream_type'] = df.apply(
+            lambda r: ("Goal" if (r.get('pomodoro_type') == "Work" and pd.notna(r.get('goal_id')) and r.get('goal_id') not in [None, ""])
+                       else ("Custom" if r.get('pomodoro_type') == "Work" else "")),
+            axis=1
+        )
     return df
 
 @st.cache_data(ttl=300)
@@ -135,7 +142,7 @@ def add_user(username: str) -> bool:
 def upsert_goal(username: str, title: str, priority_weight: int, goal_type: str, status: str = "New", target_poms: int = 0) -> str:
     # Generate deterministic goal id per user+title
     gid = hashlib.sha256(f"{username}|{title}".encode()).hexdigest()[:16]
-    # Only put non-overlapping fields in $setOnInsert to avoid operator path conflicts.
+    # Avoid $set/$setOnInsert path conflicts
     set_on_insert = {
         "_id": gid,
         "user": username,
@@ -229,6 +236,7 @@ def locked_goals_for_user_plan(username: str, plan: Dict, threshold_pct: float =
     dfw = df[mask_week & (df["pomodoro_type"] == "Work")]
     if dfw.empty:
         return []
+    # ensure goal_id column exists & comparable
     if 'goal_id' not in dfw.columns:
         dfw = dfw.copy()
         dfw['goal_id'] = None
@@ -248,6 +256,11 @@ def locked_goals_for_user_plan(username: str, plan: Dict, threshold_pct: float =
 # === SESSION SAVE ===
 def save_pomodoro_session(user: str, is_break: bool, duration: int, goal_id: Optional[str], task: str, category_label: str):
     now = now_ist()
+    if not is_break:
+        work_stream_type = "Goal" if goal_id else "Custom"
+    else:
+        work_stream_type = ""
+
     doc = {
         "type": "Pomodoro",
         "date": now.date().isoformat(),
@@ -258,6 +271,7 @@ def save_pomodoro_session(user: str, is_break: bool, duration: int, goal_id: Opt
         "goal_id": goal_id if not is_break else None,
         "task": task if not is_break else "",
         "category": category_label if (category_label and not is_break) else "",
+        "work_stream_type": work_stream_type,
         "created_at": datetime.utcnow()
     }
     collection_logs.insert_one(doc)
@@ -347,6 +361,8 @@ def init_session_state():
         # new: which week we're planning/reviewing (defaults to current date)
         "planning_week_date": now_ist().date(),
         "review_week_date": now_ist().date(),
+        # break extension accumulator (seconds)
+        "break_extend_total": 0,
     }
     for k,v in defaults.items():
         if k not in st.session_state:
@@ -516,12 +532,16 @@ def render_weekly_planner():
         save_plan_allocations(plan["_id"], list(edited.keys()), edited)
         st.success("Weekly plan saved!")
 
-# === TIMER WIDGET ===
+# === TIMER WIDGET (with auto-start break & break controls) ===
 def render_timer_widget() -> bool:
     if not st.session_state.start_time:
         return False
-    duration = BREAK_MIN*60 if st.session_state.is_break else POMODORO_MIN*60
+
+    # duration includes any break extension
+    base_duration = BREAK_MIN*60 if st.session_state.is_break else POMODORO_MIN*60
+    duration = base_duration + (st.session_state.break_extend_total if st.session_state.is_break else 0)
     remaining = int(st.session_state.start_time + duration - time.time())
+
     if remaining > 0:
         mins, secs = divmod(remaining, 60)
         session_type = "Break Time" if st.session_state.is_break else f"Working on: {st.session_state.task}"
@@ -531,27 +551,88 @@ def render_timer_widget() -> bool:
             st.markdown(f"<h1 style='text-align:center;font-size:4rem;'>⏱️ {mins:02d}:{secs:02d}</h1>", unsafe_allow_html=True)
         progress = 1 - (remaining/duration)
         st.progress(progress)
+
+        # Break controls
+        if st.session_state.is_break:
+            c1, c2, c3 = st.columns([1,1,1])
+            with c1:
+                if st.button("⏭️ Skip Break", use_container_width=True):
+                    # End break immediately
+                    save_pomodoro_session(
+                        user=st.session_state.user,
+                        is_break=True,
+                        duration=int((duration - remaining) / 60) if duration > remaining else BREAK_MIN,
+                        goal_id=None,
+                        task="",
+                        category_label=""
+                    )
+                    sound_alert()
+                    st.success("Break skipped.")
+                    # reset timer state
+                    st.session_state.start_time = None
+                    st.session_state.is_break = False
+                    st.session_state.task = ""
+                    st.session_state.active_goal_id = None
+                    st.session_state.active_goal_title = ""
+                    st.session_state.break_extend_total = 0
+                    st.rerun()
+            with c2:
+                if st.button("➕ +5 min", use_container_width=True, disabled=st.session_state.break_extend_total >= 600):
+                    st.session_state.break_extend_total = min(600, st.session_state.break_extend_total + 300)
+                    st.rerun()
+            with c3:
+                st.caption("Auto break running…")
+
         st.info("🧘 Take a breather!" if st.session_state.is_break else "💪 Stay focused!")
         time.sleep(1)
         st.rerun()
         return True
-    else:
-        label = st.session_state.active_goal_title
+
+    # ===== Timer finished branch =====
+    if st.session_state.is_break:
+        # Break finished
         save_pomodoro_session(
             user=st.session_state.user,
-            is_break=st.session_state.is_break,
-            duration=BREAK_MIN if st.session_state.is_break else POMODORO_MIN,
-            goal_id=st.session_state.active_goal_id,
-            task=st.session_state.task,
-            category_label=label
+            is_break=True,
+            duration=int((duration) / 60),
+            goal_id=None,
+            task="",
+            category_label=""
         )
         sound_alert()
-        st.balloons(); st.success("🎉 Session complete!")
+        st.balloons()
+        st.success("🎉 Break complete! Ready for your next work block?")
+        # Reset to idle; do NOT auto-start the next work by default
         st.session_state.start_time = None
         st.session_state.is_break = False
         st.session_state.task = ""
         st.session_state.active_goal_id = None
         st.session_state.active_goal_title = ""
+        st.session_state.break_extend_total = 0
+        return True
+    else:
+        # Work finished → auto-start break
+        save_pomodoro_session(
+            user=st.session_state.user,
+            is_break=False,
+            duration=POMODORO_MIN,
+            goal_id=st.session_state.active_goal_id,
+            task=st.session_state.task,
+            category_label=st.session_state.active_goal_title
+        )
+        sound_alert()
+        st.balloons()
+        st.success("🎉 Work session complete! ☕ Starting break automatically.")
+        # Immediately start break (auto-start)
+        st.session_state.start_time = time.time()
+        st.session_state.is_break = True
+        # clear extension for new break
+        st.session_state.break_extend_total = 0
+        # clear work context (optional)
+        st.session_state.task = ""
+        st.session_state.active_goal_id = None
+        st.session_state.active_goal_title = ""
+        st.rerun()
         return True
 
 # === FOCUS TIMER PAGE ===
@@ -570,8 +651,8 @@ def render_focus_timer():
     render_daily_target_planner(df_all, today_progress)
     st.divider()
 
-    # Mode toggle: Weekly Goal vs Custom Category
-    mode = st.radio("Mode", ["Weekly Goal", "Custom Category"], horizontal=True)
+    # Mode toggle: Weekly Goal vs Custom (Unplanned)
+    mode = st.radio("Mode", ["Weekly Goal", "Custom (Unplanned)"], horizontal=True)
 
     if mode == "Weekly Goal":
         active_goal_ids = plan.get("goals", [])
@@ -616,19 +697,20 @@ def render_focus_timer():
             if disabled and len(choices)>0 and selected_gid in locked:
                 st.caption("This goal is locked for balance. Switch goal for now.")
         with colb:
-            if st.button("☕ Break (5m)", use_container_width=True):
+            if st.button("☕ Start Break (5m)", use_container_width=True):
                 st.session_state.start_time = time.time()
                 st.session_state.is_break = True
                 st.session_state.active_goal_id = None
                 st.session_state.active_goal_title = ""
                 st.session_state.task = ""
+                st.session_state.break_extend_total = 0
                 st.rerun()
     else:
-        # Custom category flow (unassigned goal_id)
-        cat_options = st.session_state.custom_categories + ["+ Add New"]
-        selected = st.selectbox("📂 Category", cat_options)
-        if selected == "+ Add New":
-            new_cat = st.text_input("New category", placeholder="e.g., Marketing")
+        # Custom (Unplanned) flow (no goal_id)
+        cat_options = st.session_state.custom_categories + ["➕ Add New"]
+        selected = st.selectbox("📂 Custom Category", cat_options)
+        if selected == "➕ Add New":
+            new_cat = st.text_input("New custom category", placeholder="e.g., Marketing")
             if new_cat and st.button("✅ Add Category"):
                 if new_cat not in st.session_state.custom_categories:
                     st.session_state.custom_categories.append(new_cat)
@@ -637,10 +719,12 @@ def render_focus_timer():
             category_label = new_cat if new_cat else ""
         else:
             category_label = selected
+
         task = st.text_input("Task (micro-task)", placeholder="e.g., Draft outreach emails")
         st.session_state.active_goal_id = None
         st.session_state.active_goal_title = category_label
         st.session_state.task = task
+
         colw, colb = st.columns(2)
         with colw:
             disabled = not (category_label and task.strip())
@@ -649,12 +733,13 @@ def render_focus_timer():
                 st.session_state.is_break = False
                 st.rerun()
         with colb:
-            if st.button("☕ Break (5m)", use_container_width=True):
+            if st.button("☕ Start Break (5m)", use_container_width=True):
                 st.session_state.start_time = time.time()
                 st.session_state.is_break = True
                 st.session_state.active_goal_id = None
                 st.session_state.active_goal_title = ""
                 st.session_state.task = ""
+                st.session_state.break_extend_total = 0
                 st.rerun()
 
     # Today's compact summary
@@ -993,7 +1078,7 @@ def render_notes_viewer():
         st.info("No notes in this range")
 
 # === MAIN ===
-def render_header():
+def main_header():
     st.sidebar.markdown("### ⚙️ Admin")
     if st.sidebar.button("Initialize Mongo Indexes"):
         ensure_indexes()
@@ -1036,7 +1121,7 @@ def render_header():
                     st.warning("User already exists!")
 
 def main():
-    render_header()
+    main_header()
     st.divider()
     page = st.session_state.page
     if page == "🎯 Focus Timer":
