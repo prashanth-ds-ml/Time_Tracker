@@ -926,17 +926,32 @@ def render_analytics_review():
 
         # --- Run-rate vs Expected (cumulative) ---
         if total_planned > 0:
-            days = pd.date_range(start=week_start, end=min(week_end, now_ist().date()))
-            actual_cum = []
-            exp_cum = []
-            for i, d in enumerate(days):
-                actual_to_d = len(dfw[dfw['date'].dt.date <= d.date() & (dfw['goal_id'].notna())])
-                # simple linear expectation
-                expected_to_d = int(round(total_planned * ((i+1)/len(days))))
+            days = pd.date_range(
+                start=pd.to_datetime(week_start),
+                end=pd.to_datetime(min(week_end, now_ist().date()))
+            )
+
+            # only goal-linked work counts toward plan adherence
+            dfw_goal = dfw[dfw['goal_id'].notna()].copy()
+            dfw_goal['date_only'] = dfw_goal['date'].dt.date
+
+            actual_cum, exp_cum = [], []
+            for i, ts in enumerate(days):
+                cutoff = ts.date()
+                # number of goal sessions up to and including this day
+                actual_to_d = int((dfw_goal['date_only'] <= cutoff).sum())
+                # simple linear expectation across the week
+                expected_to_d = int(round(total_planned * ((i + 1) / len(days))))
                 actual_cum.append(actual_to_d)
                 exp_cum.append(expected_to_d)
-            rr_df = pd.DataFrame({"day":[d.strftime("%a %d") for d in days],"Actual":actual_cum,"Expected":exp_cum})
-            fig_rr = px.line(rr_df, x='day', y=['Expected','Actual'], markers=True, title="Run-Rate vs Expected (Goals only)")
+
+            rr_df = pd.DataFrame({
+                "day": [ts.strftime("%a %d") for ts in days],
+                "Actual": actual_cum,
+                "Expected": exp_cum
+            })
+            fig_rr = px.line(rr_df, x='day', y=['Expected', 'Actual'], markers=True,
+                            title="Run-Rate vs Expected (Goals only)")
             fig_rr.update_layout(height=330, legend_title="")
             st.plotly_chart(fig_rr, use_container_width=True)
 
