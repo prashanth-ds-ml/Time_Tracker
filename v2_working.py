@@ -5,7 +5,6 @@ from datetime import datetime, timedelta, date
 import pandas as pd
 import pytz
 import plotly.express as px
-import plotly.graph_objects as go
 from pymongo import MongoClient
 import hashlib
 from typing import List, Dict, Tuple, Optional
@@ -119,23 +118,6 @@ def entropy_norm_from_counts(counts):
     H = -sum((c/s) * math.log((c/s), 2) for c in arr)
     return H / math.log(k, 2)
 
-def time_to_minutes(tstr: str) -> Optional[int]:
-    """'09:15 PM' -> minutes since midnight."""
-    try:
-        dt = datetime.strptime(tstr, "%I:%M %p")
-        return dt.hour * 60 + dt.minute
-    except Exception:
-        return None
-
-def minutes_to_clock(m: int) -> str:
-    """570 -> '09:30 AM'"""
-    m = int(m)
-    h = (m // 60) % 24
-    mm = m % 60
-    ampm = "AM" if h < 12 else "PM"
-    hh = h if 1 <= h <= 12 else (12 if h % 12 == 0 else h % 12)
-    return f"{hh:02d}:{mm:02d} {ampm}"
-
 # === DATA ACCESS / CACHES ===
 @st.cache_data(ttl=300)
 def get_user_sessions(username: str) -> pd.DataFrame:
@@ -153,7 +135,6 @@ def get_user_sessions(username: str) -> pd.DataFrame:
         df['category'] = ''
     if 'pomodoro_type' not in df.columns:
         df['pomodoro_type'] = 'Work'
-    df["date_only"] = df["date"].dt.date
     return df
 
 @st.cache_data(ttl=300)
@@ -200,6 +181,7 @@ def add_user(username: str) -> bool:
 
 # === GOALS ===
 def upsert_goal(username: str, title: str, priority_weight: int, goal_type: str, status: str = "New", target_poms: int = 0) -> str:
+    # Generate deterministic goal id per user+title
     gid = hashlib.sha256(f"{username}|{title}".encode()).hexdigest()[:16]
     set_on_insert = {
         "_id": gid,
@@ -227,12 +209,6 @@ def fetch_goals(username: str, statuses: Optional[List[str]] = None) -> pd.DataF
     return pd.DataFrame(recs) if recs else pd.DataFrame(
         columns=["_id", "user", "title", "priority_weight", "goal_type", "status", "target_poms", "poms_completed"]
     )
-
-def goal_titles_map(user: str, ids: List[str]) -> Dict[str, str]:
-    if not ids:
-        return {}
-    cur = collection_goals.find({"_id": {"$in": list(ids)}, "user": user}, {"_id": 1, "title": 1})
-    return {d["_id"]: d.get("title", "(untitled)") for d in cur}
 
 # === WEEKLY PLAN ===
 def compute_weekly_capacity(settings: Dict, weekdays: int = 5, weekend_days: int = 2) -> int:
@@ -302,7 +278,7 @@ def locked_goals_for_user_plan(username: str, plan: Dict, threshold_pct: float =
     df = get_user_sessions(username)
     if df.empty:
         return []
-    mask_week = (df["date_only"] >= start) & (df["date_only"] <= today)
+    mask_week = (df["date"].dt.date >= start) & (df["date"].dt.date <= today)
     dfw = df[mask_week & (df["pomodoro_type"] == "Work")].copy()
     if dfw.empty:
         return []
@@ -368,8 +344,8 @@ def render_daily_goal(df: pd.DataFrame):
         return 0, 1, 0
     today = now_ist().date()
     df_work = df[df["pomodoro_type"]=="Work"]
-    work_today = df_work[df_work["date_only"]==today]
-    active_days = len(df_work.groupby(df_work["date_only"]).size())
+    work_today = df_work[df_work["date"].dt.date==today]
+    active_days = len(df_work.groupby(df_work["date"].dt.date).size())
     today_progress = len(work_today)
     today_minutes = int(work_today['duration'].sum())
     adaptive_goal, _, _ = get_adaptive_goal(active_days)
@@ -382,7 +358,7 @@ def render_daily_target_planner(df: pd.DataFrame, today_progress: int):
         suggested_target, phase_name, _ = 1, "🌱 Building", ""
     else:
         df_work = df[df["pomodoro_type"]=="Work"]
-        active_days = len(df_work.groupby(df_work["date_only"]).size())
+        active_days = len(df_work.groupby(df_work["date"].dt.date).size())
         suggested_target, phase_name, _ = get_adaptive_goal(active_days)
     col1, col2 = st.columns([2,3])
     with col1:
@@ -448,183 +424,14 @@ def export_sessions_csv(user: str):
     out = df.sort_values("date")
     st.download_button("⬇️ Export Sessions (CSV)", out.to_csv(index=False).encode("utf-8"), file_name=f"{user}_sessions.csv", mime="text/csv")
 
-# === WEEKLY SNAPSHOT (new) ===
-def render_goal_week_snapshot_section(user: str):
-    """Compact at-a-glance weekly status with per-goal progress & next best block."""
-    today = now_ist().date()
-    week_start, week_end = week_bounds_ist(today)
-    plan = get_or_create_weekly_plan(user, week_start)
-    allocations = plan.get("allocations", {}) or {}
-    total_planned = int(sum(allocations.values())) if allocations else 0
-
-    df = get_user_sessions(user)
-    mask_week = (df["date_only"] >= week_start) & (df["date_only"] <= week_end)
-    dfw = df[mask_week & (df["pomodoro_type"] == "Work")].copy()
-
-    # Actuals this week
-    actual_total = int(len(dfw))
-    actual_goals_only = int(dfw["goal_id"].notna().sum())
-
-    # Run-rate vs expected to today
-    days_passed = (min(today, week_end) - week_start).days + 1
-    expected_to_date = int(round(total_planned * safe_div(days_passed, 7)))
-    delta = actual_goals_only - expected_to_date
-
-    # Deep-work today
-    df_today = df[(df["date_only"] == today) & (df["pomodoro_type"] == "Work")]
-    deep_today = int((df_today["duration"] >= 23).sum())
-    deep_ratio = pct_or_dash(deep_today, len(df_today))
-
-    # Locks
-    locked = set(locked_goals_for_user_plan(user, plan))
-
-    # Titles for chips
-    goal_ids = list(allocations.keys())
-    titles = goal_titles_map(user, goal_ids)
-
-    # Per-goal actuals
-    actual_by_goal = dfw[dfw["goal_id"].notna()].groupby("goal_id").size().to_dict()
-    # Shortfalls
-    shortfalls = {gid: max(0, int(allocations.get(gid, 0)) - int(actual_by_goal.get(gid, 0))) for gid in goal_ids}
-    next_gid = None
-    if shortfalls:
-        # pick biggest shortfall; if tie, pick higher weight by goal doc (optional)
-        next_gid = max(shortfalls, key=lambda g: shortfalls[g])
-        if shortfalls[next_gid] <= 0:
-            next_gid = None
-
-    # --- UI ---
-    st.subheader("📌 Goal Week Snapshot")
-    a, b, c, d = st.columns(4)
-    with a:
-        util = pct_or_dash(actual_total, total_planned)
-        st.metric("Capacity Utilization", util)
-    with b:
-        label = "On Track" if delta >= 0 else f"{abs(delta)} behind"
-        st.metric("Run-Rate to Today", f"{max(0, int(actual_goals_only))}/{expected_to_date if total_planned>0 else 0}", help=label)
-    with c:
-        st.metric("Deep-work Today", deep_ratio)
-    with d:
-        st.metric("Planned (week)", total_planned)
-
-    # Suggest next block
-    suggest = ""
-    if next_gid:
-        suggest = f"Do 1 pomodoro on **{titles.get(next_gid, '(goal)')}** to get back on plan (shortfall: {shortfalls[next_gid]})."
-    elif total_planned > 0:
-        suggest = "Great pace. Pick any planned goal to maintain momentum."
-    else:
-        suggest = "No plan saved for this week. Use **Weekly Planner** to distribute capacity."
-
-    st.info(suggest)
-
-    # Per-goal progress chips
-    if allocations:
-        st.markdown("#### Weekly Progress by Goal")
-        cols = st.columns(min(4, len(allocations)))
-        i = 0
-        for gid, planned in allocations.items():
-            with cols[i % len(cols)]:
-                title = titles.get(gid, "(goal)")
-                actual = int(actual_by_goal.get(gid, 0))
-                lock_str = " 🔒" if gid in locked else ""
-                st.markdown(f"**{title}{lock_str}**")
-                st.progress(min(1.0, safe_div(actual, max(1, planned))), text=f"{actual}/{planned}")
-            i += 1
-
-# === RHYTHM VISUALS (new) ===
-def render_start_time_stability_chart(df_all: pd.DataFrame, days: int = 30):
-    """Line of first work start time per day (last N days) with rolling avg & soft band."""
-    today = now_ist().date()
-    cutoff = today - timedelta(days=days-1)
-    dfw = df_all[(df_all["pomodoro_type"]=="Work") & (df_all["date_only"]>=cutoff)].copy()
-    if dfw.empty:
-        st.info("No recent work sessions for start-time chart.")
-        return
-
-    # First start by day
-    # convert time to minutes and take min per day
-    dfw["start_min"] = dfw["time"].apply(time_to_minutes)
-    g = dfw.groupby("date_only")["start_min"].min().dropna().sort_index()
-    if g.empty:
-        st.info("Insufficient time data for start-time chart.")
-        return
-
-    s = g.copy()
-    roll = s.rolling(7, min_periods=1).mean()
-    band_low = roll - 30
-    band_high = roll + 30
-
-    fig = go.Figure()
-    # Band
-    fig.add_trace(go.Scatter(
-        x=s.index, y=band_high, mode="lines", line=dict(width=0),
-        showlegend=False, hoverinfo='skip'
-    ))
-    fig.add_trace(go.Scatter(
-        x=s.index, y=band_low, mode="lines", fill="tonexty", line=dict(width=0),
-        name="Stability band (±30m)", hoverinfo='skip'
-    ))
-    # First start
-    fig.add_trace(go.Scatter(
-        x=s.index, y=s.values, mode="lines+markers",
-        name="First Start", hovertemplate="%{x|%b %d}: "+ "%{y} min since midnight<extra></extra>"
-    ))
-    # Rolling avg
-    fig.add_trace(go.Scatter(
-        x=roll.index, y=roll.values, mode="lines",
-        name="7-day Avg", line=dict(dash="dash")
-    ))
-
-    # Y ticks as clock labels
-    tickvals = []
-    base = 6*60
-    for k in range(0, 16):  # 6AM .. 9PM
-        tickvals.append(base + 60*k)
-    ticktext = [minutes_to_clock(v) for v in tickvals]
-
-    fig.update_layout(
-        title="Start-time Stability (last 30 days)",
-        height=300, margin=dict(l=10, r=10, t=40, b=30),
-        xaxis_title="", yaxis=dict(title="", tickmode="array", tickvals=tickvals, ticktext=ticktext)
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-def render_consistency_heatmap(df_all: pd.DataFrame, weeks: int = 8):
-    """GitHub-style heatmap: rows=Mon..Sun, cols=weeks (last N), cell=value=sessions per day."""
-    if df_all.empty:
-        return
-    today = now_ist().date()
-    this_monday = today - timedelta(days=today.weekday())
-    mondays = [this_monday - timedelta(weeks=w) for w in range(weeks-1, -1, -1)]
-    # Build 7 x weeks matrix
-    z = []
-    for dow in range(7):  # 0..6 Mon..Sun
-        row_vals = []
-        for m in mondays:
-            day = m + timedelta(days=dow)
-            cnt = int(((df_all["date_only"] == day) & (df_all["pomodoro_type"]=="Work")).sum())
-            row_vals.append(cnt)
-        z.append(row_vals)
-
-    y_labels = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
-    x_labels = [m.strftime("%b %d") for m in mondays]
-
-    fig = go.Figure(data=go.Heatmap(
-        z=z, x=x_labels, y=y_labels, colorscale="YlGn", colorbar=dict(title="Sessions")
-    ))
-    fig.update_layout(
-        title=f"Consistency Heatmap (last {weeks} weeks)",
-        height=240, margin=dict(l=10, r=10, t=40, b=10)
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
 # === WEEKLY PLANNER PAGE ===
 def render_weekly_planner():
     st.header("📅 Weekly Goal Planner")
 
     user = st.session_state.user
+    # Week picker
     pick_date = st.date_input("📆 Plan for week of", value=st.session_state.planning_week_date)
+    # normalize to Monday
     week_start, week_end = week_bounds_ist(pick_date)
     if pick_date != st.session_state.planning_week_date:
         st.session_state.planning_week_date = pick_date
@@ -684,6 +491,7 @@ def render_weekly_planner():
     auto = proportional_allocation(total_poms, weight_map)
     st.caption("Adjust numbers to fine-tune allocations (sum preserved).")
 
+    # if plan is empty, offer to copy last week's plan
     prev_start = week_start - timedelta(days=7)
     prev_plan = collection_plans.find_one({"_id": f"{user}|{prev_start.isoformat()}"})
 
@@ -793,22 +601,13 @@ def render_focus_timer():
         return
 
     user = st.session_state.user
+    # Focus Timer always uses the *current week* for locking/context
     plan = get_or_create_weekly_plan(user, now_ist().date())
 
     # Daily Target Planner (top)
     df_all = get_user_sessions(user)
     today_progress, adaptive_goal, today_minutes = render_daily_goal(df_all)
     render_daily_target_planner(df_all, today_progress)
-    st.divider()
-
-    # --- NEW: Weekly Snapshot + Rhythm mini-dash ---
-    render_goal_week_snapshot_section(user)
-    with st.expander("📈 Rhythm at a glance", expanded=False):
-        c1, c2 = st.columns([3,2])
-        with c1:
-            render_start_time_stability_chart(df_all, days=30)
-        with c2:
-            render_consistency_heatmap(df_all, weeks=8)
     st.divider()
 
     # Mode toggle: Weekly Goal vs Custom (Unplanned)
@@ -904,6 +703,7 @@ def render_focus_timer():
     df = get_user_sessions(user)
     if not df.empty:
         today = now_ist().date()
+        df["date_only"] = df["date"].dt.date
         today_data = df[df["date_only"] == today]
         work_today = today_data[today_data["pomodoro_type"]=="Work"]
         breaks_today = len(today_data[today_data["pomodoro_type"]=="Break"])
@@ -1068,6 +868,7 @@ def render_analytics_review():
             extend = max(0, len(dfb) - expected_breaks)
             st.metric("Break Extend", pct_or_dash(extend, expected_breaks))
 
+        # Extra rhythm/discipline readouts
         st.caption(
             f"Avg Break = {(dfb['duration'].mean() if len(dfb) else 0.0):.1f} min • "
             f"Capacity = {total_planned if total_planned>0 else '—'} planned slots "
@@ -1076,6 +877,7 @@ def render_analytics_review():
 
         # Discipline & Rhythm block
         st.subheader("Discipline & Rhythm")
+        # Switching-Cost Index: fraction of transitions that change goal/category
         dfw_sorted = dfw.sort_values(["date", "time"])
         switches = 0
         runs = 0
@@ -1088,15 +890,18 @@ def render_analytics_review():
             prev_key = key
             runs += 1
         switch_idx = safe_div(switches, max(1, runs - 1))
-
         # Start-time sigma (minutes)
+        def time_to_minutes(tstr):
+            try:
+                dt = datetime.strptime(tstr, "%I:%M %p")
+                return dt.hour*60 + dt.minute
+            except Exception:
+                return None
         starts = [time_to_minutes(x) for x in dfw["time"].tolist() if isinstance(x, str)]
         starts = [s for s in starts if s is not None]
         start_sigma = (pd.Series(starts).std() if len(starts) >= 2 else None)
-
         # Work/Break ratio
         wb_ratio = safe_div(len(dfw), max(1, len(dfb)))
-
         # Chronotype (peak hour)
         if len(starts) > 0:
             hours = [s//60 for s in starts]
@@ -1105,9 +910,11 @@ def render_analytics_review():
             ph_disp = f"{(peak_hour if 1 <= peak_hour <= 12 else (12 if peak_hour%12==0 else peak_hour%12))}{ampm}"
         else:
             ph_disp = "—"
-
         # Task granularity: median sessions per task this week
-        med_sessions_per_task = dfw.groupby("task").size().median() if not dfw.empty else None
+        if not dfw.empty:
+            med_sessions_per_task = dfw.groupby("task").size().median()
+        else:
+            med_sessions_per_task = None
 
         d1, d2, d3, d4 = st.columns(4)
         with d1:
@@ -1191,6 +998,7 @@ def render_analytics_review():
                 end=pd.to_datetime(min(week_end, now_ist().date()))
             )
             dfw_goal = dfw[dfw["goal_id"].notna()].copy()
+            dfw_goal["date_only"] = dfw_goal["date"].dt.date
 
             actual_cum, exp_cum = [], []
             for i, ts in enumerate(days):
