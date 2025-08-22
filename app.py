@@ -622,8 +622,15 @@ def goal_title_map(user: str) -> Dict[str, str]:
     docs = list(collection_goals.find({"user": user}, {"_id": 1, "title": 1}))
     return {d["_id"]: d["title"] for d in docs}
 
-def this_week_glance(user: str, plan: Dict, df_work: pd.DataFrame):
-    """Render small chips: Goal Title · actual/plan for current week."""
+def this_week_glance(user: str, plan: Dict, df_work: pd.DataFrame, *, hide_zero: bool = True, sort_by: str = "remaining"):
+    """
+    Render compact chips: Goal Title · actual/plan + tiny progress bar.
+    Colors:
+      - ✅ green when actual >= planned
+      - 🧡 amber when 50–99% of plan
+      - 🔴 red when <50% of plan
+      - ⚪ gray when 0 / or no plan
+    """
     start = datetime.fromisoformat(plan["week_start"]).date()
     end = datetime.fromisoformat(plan["week_end"]).date()
     active_ids = plan.get("goals", [])
@@ -631,29 +638,81 @@ def this_week_glance(user: str, plan: Dict, df_work: pd.DataFrame):
     if not active_ids or not alloc:
         st.info("No allocations yet for this week. Set them in the Weekly Planner.")
         return
-    # restrict work to this week
+
+    # limit to this week’s work sessions
     dfw = df_work.copy()
     dfw["date_only"] = dfw["date"].dt.date
     dfw = dfw[(dfw["date_only"] >= start) & (dfw["date_only"] <= end)]
+
     # counts by goal
     by_goal = dfw[dfw["goal_id"].notna()].groupby("goal_id").size().to_dict()
-    titles = goal_title_map(user)
-    chips = []
+    titles = {d["_id"]: d["title"] for d in collection_goals.find({"user": user}, {"_id": 1, "title": 1})}
+
+    items = []
     for gid in active_ids:
         t = titles.get(gid, "(missing)")
         planned = int(alloc.get(gid, 0))
         actual = int(by_goal.get(gid, 0))
-        status_color = "#10b981" if actual >= planned and planned > 0 else ("#f59e0b" if 0 < actual < planned else "#9ca3af")
-        chips.append(f"""
-            <div style="display:inline-block;margin:4px 6px;padding:6px 10px;border-radius:999px;border:1px solid #e5e7eb;">
-                <span style="font-weight:600;color:#111827;">{t}</span>
-                <span style="margin-left:6px;color:{status_color};font-weight:600;">{actual}/{planned}</span>
-            </div>
-        """)
-    st.markdown(
-        "<div style='margin:6px 0 0 0;'>" + "".join(chips) + "</div>",
-        unsafe_allow_html=True
-    )
+        if hide_zero and planned == 0 and actual == 0:
+            continue
+
+        pct = 0 if planned == 0 else min(100, int(round(100 * actual / planned)))
+        remaining = max(0, planned - actual)
+
+        # colors
+        if planned == 0 and actual == 0:
+            text_color = "#9ca3af"   # gray
+            bar_color = "#d1d5db"
+        elif actual >= planned:
+            text_color = "#10b981"   # green
+            bar_color = "#34d399"
+        elif pct >= 50:
+            text_color = "#f59e0b"   # amber
+            bar_color = "#fbbf24"
+        else:
+            text_color = "#ef4444"   # red
+            bar_color = "#f87171"
+
+        html = f"""
+        <div class="chip" title="{actual}/{planned} done • {remaining} left">
+          <div class="chip-title">{t}</div>
+          <div class="chip-right" style="color:{text_color};">{actual}/{planned}</div>
+          <div class="chip-bar"><div style="width:{pct}%; background:{bar_color};"></div></div>
+        </div>
+        """
+
+        # sort key
+        key = remaining if sort_by == "remaining" else planned
+        items.append((key, html))
+
+    if not items:
+        st.info("No goals to show here yet.")
+        return
+
+    # sort: by remaining (desc) by default; or by planned (desc)
+    items.sort(key=lambda x: x[0], reverse=True)
+
+    css = """
+    <style>
+      .glance-wrap { display:flex; flex-wrap:wrap; gap:8px; }
+      .chip {
+        position:relative; display:inline-block;
+        border:1px solid #e5e7eb; border-radius:12px;
+        padding:8px 10px 10px 10px; min-width:220px; max-width:320px;
+        background:#ffffff;
+      }
+      .chip-title {
+        font-weight:600; color:#111827; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+        padding-right:56px;
+      }
+      .chip-right {
+        position:absolute; top:8px; right:10px; font-weight:700;
+      }
+      .chip-bar { margin-top:6px; height:4px; background:#f3f4f6; border-radius:999px; overflow:hidden; }
+      .chip-bar > div { height:100%; border-radius:999px; }
+    </style>
+    """
+    st.markdown(css + "<div class='glance-wrap'>" + "".join([h for _, h in items]) + "</div>", unsafe_allow_html=True)
 
 def start_time_sparkline(df_work: pd.DataFrame):
     """Tiny line: first work session start time per day for last 14 days."""
