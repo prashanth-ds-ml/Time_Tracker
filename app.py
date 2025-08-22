@@ -229,68 +229,38 @@ def proportional_allocation(total: int, weights: Dict[str, int]) -> Dict[str, in
             idx += 1
     return allocated
 
-def compute_capacity_for_week(username: str, week_start: date) -> int:
-    settings = get_user_settings(username)
-    wd, we = week_day_counts(week_start)
-    return compute_weekly_capacity(settings, weekdays=wd, weekend_days=we)
-
-def get_or_create_weekly_plan(username: str, d: Optional[date] = None, ensure_capacity_sync: bool = True) -> Dict:
+def get_or_create_weekly_plan(username: str, d: Optional[date] = None) -> Dict:
     if d is None:
         d = now_ist().date()
     week_start, week_end = week_bounds_ist(d)
     pid = f"{username}|{week_start.isoformat()}"
-
     plan = collection_plans.find_one({"_id": pid})
-    if not plan:
-        total = compute_capacity_for_week(username, week_start)
-        plan = {
-            "_id": pid,
-            "user": username,
-            "week_start": week_start.isoformat(),
-            "week_end": week_end.isoformat(),
-            "total_poms": int(total),
-            "goals": [],
-            "allocations": {},
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
-        }
-        collection_plans.insert_one(plan)
+    if plan:
         return plan
-
-    if ensure_capacity_sync:
-        total = compute_capacity_for_week(username, week_start)
-        if int(plan.get("total_poms", 0)) != int(total):
-            collection_plans.update_one(
-                {"_id": pid},
-                {"$set": {"total_poms": int(total), "updated_at": datetime.utcnow()}}
-            )
-            plan["total_poms"] = int(total)
-    return plan
+    settings = get_user_settings(username)
+    wd, we = week_day_counts(week_start)
+    total_poms = compute_weekly_capacity(settings, weekdays=wd, weekend_days=we)
+    doc = {
+        "_id": pid,
+        "user": username,
+        "week_start": week_start.isoformat(),
+        "week_end": week_end.isoformat(),
+        "total_poms": total_poms,
+        "goals": [],
+        "allocations": {},
+        "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow()
+    }
+    collection_plans.insert_one(doc)
+    return doc
 
 def save_plan_allocations(plan_id: str, goals: List[str], allocations: Dict[str, int]):
-    # keep only non-negative ints and dedupe keys
-    goals_unique = []
-    seen = set()
-    for g in goals:
-        if g and g not in seen:
-            goals_unique.append(g)
-            seen.add(g)
-
-    clean_alloc = {}
-    for gid, v in allocations.items():
-        if gid and gid in seen:
-            try:
-                clean_alloc[gid] = max(0, int(v))
-            except Exception:
-                clean_alloc[gid] = 0
-
+    # dedupe goals and keep only keys present in allocations
+    goals_unique = sorted(set(goals))
+    clean_alloc = {gid: int(allocations.get(gid, 0)) for gid in goals_unique}
     collection_plans.update_one(
         {"_id": plan_id},
-        {"$set": {
-            "goals": goals_unique,
-            "allocations": clean_alloc,
-            "updated_at": datetime.utcnow()
-        }}
+        {"$set": {"goals": goals_unique, "allocations": clean_alloc, "updated_at": datetime.utcnow()}}
     )
 
 # === LOCKING MECHANISM ===
@@ -383,6 +353,7 @@ def render_daily_goal(df: pd.DataFrame):
 
 def render_daily_target_planner(df: pd.DataFrame, today_progress: int):
     st.markdown("## 🎯 Daily Target Planner")
+    st.caption("Set a realistic daily Pomodoro target. Keep it steady for consistency.")
     current_target = get_daily_target(st.session_state.user)
     if df.empty:
         suggested_target, phase_name, _ = 1, "🌱 Building", ""
@@ -456,49 +427,44 @@ def export_sessions_csv(user: str):
 
 # === WEEKLY PLANNER PAGE ===
 def render_weekly_planner():
-    st.header("📅 Weekly Goal Planner")
+    st.header("📅 Weekly Planner")
+    st.caption("Set capacity and distribute Pomodoros across this week’s priorities.")
 
     user = st.session_state.user
-    # Week picker (normalized to Monday)
-    pick_date = st.date_input("📆 Plan for week of", value=st.session_state.planning_week_date)
+    # Week picker
+    pick_date = st.date_input("📆 Plan for week of (Monday)", value=st.session_state.planning_week_date)
+    # normalize to Monday
     week_start, week_end = week_bounds_ist(pick_date)
     if pick_date != st.session_state.planning_week_date:
         st.session_state.planning_week_date = pick_date
         st.rerun()
 
-    # Keep the plan's total_poms in sync with current capacity
-    plan = get_or_create_weekly_plan(user, week_start, ensure_capacity_sync=True)
-
-    # Capacity controls (persist to user defaults, plan auto-syncs)
     settings = get_user_settings(user)
+    plan = get_or_create_weekly_plan(user, week_start)
+
     colA, colB, colC = st.columns(3)
     with colA:
-        wp = st.number_input("Avg Pomodoros / Weekday", 0, 12, value=settings["weekday_poms"])
+        wp = st.number_input("Weekday capacity (per day)", 0, 12, value=settings["weekday_poms"])
     with colB:
-        we = st.number_input("Avg Pomodoros / Weekend Day", 0, 12, value=settings["weekend_poms"])
+        we = st.number_input("Weekend capacity (per day)", 0, 12, value=settings["weekend_poms"])
     with colC:
-        total = compute_capacity_for_week(user, week_start)
-        st.metric(f"Weekly Capacity ({week_start} → {week_end})", f"{total}")
+        wd_count, we_count = week_day_counts(week_start)
+        total_capacity = compute_weekly_capacity({"weekday_poms": wp, "weekend_poms": we}, weekdays=wd_count, weekend_days=we_count)
+        st.metric(f"Weekly Capacity ({week_start} → {week_end})", f"{total_capacity}")
         if (wp != settings["weekday_poms"]) or (we != settings["weekend_poms"]):
             if st.button("💾 Save Capacity", use_container_width=True):
-                users_collection.update_one(
-                    {"username": user},
-                    {"$set": {"weekday_poms": int(wp), "weekend_poms": int(we)}}
-                )
+                users_collection.update_one({"username": user}, {"$set": {"weekday_poms": int(wp), "weekend_poms": int(we)}})
                 get_user_settings.clear()
-                st.success("Updated defaults. Plan capacity will auto-sync.")
+                st.success("Updated user defaults")
                 st.rerun()
 
     st.divider()
 
-    # Active goals (editable = New/In Progress only)
-    goals_df = fetch_goals(user, statuses=["New","In Progress"])
-    if goals_df.empty:
-        st.info("Add 3–4 goals below to plan this week.")
-    with st.expander("➕ Add or Update Goal"):
+    st.subheader("🎯 Define Priorities (Top 3–4)")
+    with st.expander("➕ Add or Update Goal", expanded=False):
         g_title = st.text_input("Title", placeholder="e.g., UGC NET Paper 1")
         g_type = st.selectbox("Type", ["Certification","Portfolio","Job Prep","Research","Startup","Learning","Other"], index=0)
-        g_weight = st.select_slider("Priority Weight", options=[1,2,3], value=2, help="High=3, Medium=2, Low=1")
+        g_weight = st.select_slider("Priority", options=[1,2,3], value=2, help="High=3, Medium=2, Low=1")
         g_status = st.selectbox("Status", ["New","In Progress","Completed","On Hold","Archived"], index=0)
         if st.button("💾 Save Goal"):
             if g_title.strip():
@@ -509,115 +475,82 @@ def render_weekly_planner():
             else:
                 st.warning("Please provide a title")
 
+    goals_df = fetch_goals(user, statuses=["New","In Progress"])
     if goals_df.empty:
+        st.info("Add 3–4 goals above to plan this week.")
         return
 
     st.markdown("#### Active Goals")
-    show = goals_df[["_id","title","goal_type","priority_weight","status"]] \
-            .rename(columns={"_id":"Goal ID","goal_type":"Type","priority_weight":"Weight"})
+    show = goals_df[["_id","title","goal_type","priority_weight","status"]].rename(columns={"_id":"Goal ID","goal_type":"Type","priority_weight":"Weight"})
     st.dataframe(show, use_container_width=True, hide_index=True)
 
     st.divider()
+
     st.subheader("🧮 Allocate Weekly Pomodoros")
-
-    total = compute_capacity_for_week(user, week_start)
-    # Auto allocation suggestion (helper only)
+    wd_count, we_count = week_day_counts(week_start)
+    total_poms = compute_weekly_capacity(get_user_settings(user), weekdays=wd_count, weekend_days=we_count)
     weight_map = {row["_id"]: int(row["priority_weight"]) for _, row in goals_df.iterrows()}
-    auto_suggestion = proportional_allocation(total, weight_map)
+    auto = proportional_allocation(total_poms, weight_map)
+    st.caption("Use ‘Suggest by Priority’ for a first draft, then tweak. ‘Normalize’ fixes totals to match capacity.")
 
-    # Current plan state
-    current_alloc = dict(plan.get("allocations", {}) or {})
-    current_goal_ids = list(current_alloc.keys())
-
-    # Warn if plan contains goals that are no longer active (hidden from editor)
-    active_ids = set(goals_df["_id"].tolist())
-    stale_in_plan = [gid for gid in current_goal_ids if gid not in active_ids]
-    if stale_in_plan:
-        st.info("This plan includes goals that are no longer active; they’re hidden below and will be preserved unless you overwrite.")
-
-    plan_has_alloc = sum(current_alloc.values()) > 0
-    if plan_has_alloc:
-        st.warning("A plan already exists for this week. You can update it below. To replace entirely, tick **Overwrite** before saving.")
-
-    # Controls to prefill editor with either current plan or auto suggestion
-    pref_col1, pref_col2 = st.columns([1, 1])
-    with pref_col1:
-        use_current = st.button("Use current plan values", disabled=not plan_has_alloc)
-    with pref_col2:
-        use_auto = st.button("Reset to suggested auto-allocation")
-
-    # Build editable grid
-    edited = {}
-    cols = st.columns(min(4, max(1, len(auto_suggestion))))
-    for i, (_, row) in enumerate(goals_df.iterrows()):
-        gid = row["_id"]
-        with cols[i % len(cols)]:
-            if use_auto or (not plan_has_alloc):
-                base_val = int(auto_suggestion.get(gid, 0))
-            else:
-                base_val = int(current_alloc.get(gid, auto_suggestion.get(gid, 0)))
-
-            edited_val = st.number_input(
-                f"{row['title']}",
-                min_value=0, max_value=total, value=base_val, step=1,
-                key=f"alloc_{gid}"
-            )
-            edited[gid] = int(edited_val)
-
-    sum_edit = sum(edited.values())
-    norm_col1, norm_col2 = st.columns([2, 1])
-    with norm_col1:
-        if sum_edit != total:
-            st.warning(f"Allocations sum to **{sum_edit}**, but weekly capacity is **{total}**.")
-    with norm_col2:
-        if st.button("🔁 Normalize to capacity"):
-            normed = proportional_allocation(total, {gid: max(1, v) for gid, v in edited.items()})
-            for gid, v in normed.items():
-                st.session_state[f"alloc_{gid}"] = v
-            st.success("Normalized. Review and save if it looks good.")
-            st.rerun()
-
-    overwrite = st.checkbox(
-        "I understand this will overwrite the existing plan for this week",
-        value=False, disabled=not plan_has_alloc
-    )
-
-    # Single Save action (in a form to avoid partial writes)
-    with st.form("save_plan_form", clear_on_submit=False):
-        submitted = st.form_submit_button(
-            "📌 Update Weekly Plan" if plan_has_alloc else "📌 Save Weekly Plan",
-            disabled=(plan_has_alloc and not overwrite),
-            type="primary"
-        )
-        if submitted:
-            # If overwriting, use only edited active goals.
-            # If not, merge: keep stale goals (hidden) + edited active goals.
-            if plan_has_alloc and not overwrite:
-                merged_alloc = dict(current_alloc)
-                merged_alloc.update(edited)
-                final_goals = list({*merged_alloc.keys()})
-                save_plan_allocations(plan["_id"], final_goals, merged_alloc)
-            else:
-                final_goals = list(edited.keys())
-                save_plan_allocations(plan["_id"], final_goals, edited)
-            st.success("Weekly plan saved!")
-            st.rerun()
-
-    # Copy last week's plan (only if nothing planned or if overwrite is explicitly allowed)
     prev_start = week_start - timedelta(days=7)
     prev_plan = collection_plans.find_one({"_id": f"{user}|{prev_start.isoformat()}"})
-    can_copy = (not plan_has_alloc) or overwrite
-    if prev_plan and prev_plan.get("allocations") and can_copy:
-        if st.button(f"📋 Copy last week's plan ({prev_start} → {prev_start + timedelta(days=6)})"):
-            save_plan_allocations(
-                plan["_id"],
-                list(prev_plan["allocations"].keys()),
-                {k: int(v) for k, v in prev_plan["allocations"].items()}
-            )
-            st.success("Copied last week's plan")
+
+    # Prevent accidental overwrite flag
+    plan_has_alloc = bool(plan.get("allocations"))
+    if plan_has_alloc:
+        st.warning("A plan already exists for this week. You can update it below. To replace entirely, tick the overwrite box before saving.")
+
+    if (not plan.get("allocations")) and prev_plan and prev_plan.get("allocations"):
+        if st.button(f"📋 Copy last week’s plan ({prev_start} → {prev_start+timedelta(days=6)})"):
+            save_plan_allocations(plan["_id"], list(prev_plan["allocations"].keys()), prev_plan["allocations"])
+            st.success("Copied last week’s plan")
             st.rerun()
-    elif prev_plan and prev_plan.get("allocations") and (not can_copy):
-        st.caption("Tip: Tick **Overwrite** to enable copying last week’s plan.")
+
+    edited = {}
+    cols = st.columns(min(4, len(auto)) if len(auto) > 0 else 1)
+    i = 0
+    for _, row in goals_df.iterrows():
+        with cols[i % len(cols)]:
+            default_val = int(plan.get("allocations", {}).get(row['_id'], auto[row['_id']]))
+            val = st.number_input(f"{row['title']}", min_value=0, max_value=total_poms, value=default_val, step=1, key=f"alloc_{row['_id']}")
+            edited[row["_id"]] = int(val)
+        i += 1
+
+    # Plan health
+    sum_edit = sum(edited.values())
+    health_pct = safe_div(sum_edit, total_poms) if total_poms > 0 else 0.0
+    st.markdown("##### Plan Health")
+    st.progress(min(1.0, health_pct), text=f"Allocated {sum_edit} / Capacity {total_poms}")
+
+    # One single banner if off
+    if sum_edit != total_poms:
+        st.warning(f"Allocations sum to {sum_edit}, not {total_poms}. Use the helpers below.")
+
+    colh1, colh2, colh3 = st.columns([1,1,3])
+    with colh1:
+        if st.button("🧮 Suggest by Priority"):
+            # set inputs to auto suggestion
+            for gid, v in auto.items():
+                st.session_state[f"alloc_{gid}"] = int(v)
+            st.rerun()
+    with colh2:
+        if st.button("🔁 Normalize"):
+            normed = proportional_allocation(total_poms, {gid: max(1, v) for gid, v in edited.items()})
+            for gid, v in normed.items():
+                st.session_state[f"alloc_{gid}"] = v
+            st.rerun()
+    with colh3:
+        st.caption("Suggestions distribute capacity proportional to priority. Normalize ensures the total equals capacity.")
+
+    overwrite = st.checkbox("Overwrite existing plan for this week", value=False, disabled=not plan_has_alloc)
+    btn_label = "📌 Update Weekly Plan" if plan_has_alloc else "📌 Save Weekly Plan"
+    disabled_save = plan_has_alloc and (not overwrite)
+
+    if st.button(btn_label, type="primary", disabled=disabled_save):
+        save_plan_allocations(plan["_id"], list(edited.keys()), edited)
+        st.success("Weekly plan saved!")
+        st.rerun()
 
 # === TIMER WIDGET ===
 def render_timer_widget(auto_break: bool) -> bool:
@@ -634,7 +567,23 @@ def render_timer_widget(auto_break: bool) -> bool:
             st.markdown(f"<h1 style='text-align:center;font-size:4rem;'>⏱️ {mins:02d}:{secs:02d}</h1>", unsafe_allow_html=True)
         progress = 1 - (remaining/duration)
         st.progress(progress)
-        st.info("🧘 Take a breather!" if st.session_state.is_break else "💪 Stay focused!")
+        if st.session_state.is_break:
+            # Small inline controls for break management
+            c1, c2, c3 = st.columns([1,1,2])
+            with c1:
+                if st.button("⏭️ Skip Break"):
+                    # end break immediately
+                    st.session_state.start_time = None
+                    st.session_state.is_break = False
+                    st.rerun()
+            with c2:
+                if st.button("➕ Extend +2m"):
+                    # extend by 120s: move start_time back 120s
+                    st.session_state.start_time -= 120
+                    st.rerun()
+            st.info("🧘 Take a breather!")
+        else:
+            st.info("💪 Stay focused!")
         time.sleep(1)
         st.rerun()
         return True
@@ -668,9 +617,83 @@ def render_timer_widget(auto_break: bool) -> bool:
             st.rerun()
         return True
 
+# === UTILS FOR FOCUS TIMER “WEEK AT A GLANCE” ===
+def goal_title_map(user: str) -> Dict[str, str]:
+    docs = list(collection_goals.find({"user": user}, {"_id": 1, "title": 1}))
+    return {d["_id"]: d["title"] for d in docs}
+
+def this_week_glance(user: str, plan: Dict, df_work: pd.DataFrame):
+    """Render small chips: Goal Title · actual/plan for current week."""
+    start = datetime.fromisoformat(plan["week_start"]).date()
+    end = datetime.fromisoformat(plan["week_end"]).date()
+    active_ids = plan.get("goals", [])
+    alloc = plan.get("allocations", {}) or {}
+    if not active_ids or not alloc:
+        st.info("No allocations yet for this week. Set them in the Weekly Planner.")
+        return
+    # restrict work to this week
+    dfw = df_work.copy()
+    dfw["date_only"] = dfw["date"].dt.date
+    dfw = dfw[(dfw["date_only"] >= start) & (dfw["date_only"] <= end)]
+    # counts by goal
+    by_goal = dfw[dfw["goal_id"].notna()].groupby("goal_id").size().to_dict()
+    titles = goal_title_map(user)
+    chips = []
+    for gid in active_ids:
+        t = titles.get(gid, "(missing)")
+        planned = int(alloc.get(gid, 0))
+        actual = int(by_goal.get(gid, 0))
+        status_color = "#10b981" if actual >= planned and planned > 0 else ("#f59e0b" if 0 < actual < planned else "#9ca3af")
+        chips.append(f"""
+            <div style="display:inline-block;margin:4px 6px;padding:6px 10px;border-radius:999px;border:1px solid #e5e7eb;">
+                <span style="font-weight:600;color:#111827;">{t}</span>
+                <span style="margin-left:6px;color:{status_color};font-weight:600;">{actual}/{planned}</span>
+            </div>
+        """)
+    st.markdown(
+        "<div style='margin:6px 0 0 0;'>" + "".join(chips) + "</div>",
+        unsafe_allow_html=True
+    )
+
+def start_time_sparkline(df_work: pd.DataFrame):
+    """Tiny line: first work session start time per day for last 14 days."""
+    if df_work.empty:
+        return
+    today = now_ist().date()
+    dfw = df_work.copy()
+    dfw["date_only"] = dfw["date"].dt.date
+
+    def time_to_minutes(tstr):
+        try:
+            dt = datetime.strptime(tstr, "%I:%M %p")
+            return dt.hour*60 + dt.minute
+        except Exception:
+            return None
+
+    rows = []
+    for i in range(13, -1, -1):
+        d = today - timedelta(days=i)
+        day = dfw[dfw["date_only"] == d]
+        if not day.empty:
+            mins = [time_to_minutes(t) for t in day["time"].tolist() if isinstance(t, str)]
+            mins = [m for m in mins if m is not None]
+            v = min(mins) if mins else None
+        else:
+            v = None
+        rows.append({"date": d.strftime("%m/%d"), "first_start": v})
+    sdf = pd.DataFrame(rows).dropna()
+    if sdf.empty:
+        return
+    fig = px.line(sdf, x="date", y="first_start", markers=True, title=None)
+    fig.update_layout(height=120, margin=dict(l=10, r=10, t=10, b=10), yaxis_title=None, xaxis_title=None)
+    fig.update_yaxes(tickformat="02d")
+    st.caption("Start-time stability (earlier & steady is better)")
+    st.plotly_chart(fig, use_container_width=True)
+
 # === FOCUS TIMER PAGE ===
 def render_focus_timer():
     st.header("🎯 Focus Timer")
+    st.caption("Start focused 25-minute work blocks. Keep it simple and steady.")
 
     # user settings (auto-break + custom category list)
     settings = get_user_settings(st.session_state.user)
@@ -686,17 +709,25 @@ def render_focus_timer():
         return
 
     user = st.session_state.user
-    # Focus Timer always uses the *current week* for locking/context
+    # Current week context
     plan = get_or_create_weekly_plan(user, now_ist().date())
 
     # Daily Target Planner (top)
     df_all = get_user_sessions(user)
     today_progress, adaptive_goal, today_minutes = render_daily_goal(df_all)
     render_daily_target_planner(df_all, today_progress)
+
     st.divider()
 
-    # Mode toggle: Weekly Goal vs Custom (Unplanned)
-    mode = st.radio("Mode", ["Weekly Goal", "Custom (Unplanned)"], horizontal=True)
+    # “This week at a glance” + start-time sparkline
+    st.subheader("📌 This Week at a Glance")
+    df_work = df_all[df_all["pomodoro_type"] == "Work"].copy()
+    this_week_glance(user, plan, df_work)
+    start_time_sparkline(df_work)
+    st.divider()
+
+    # Mode toggle: Weekly Goal vs Custom Session
+    mode = st.radio("Mode", ["Weekly Goal", "Custom Session"], horizontal=True)
 
     if mode == "Weekly Goal":
         active_goal_ids = plan.get("goals", [])
@@ -709,6 +740,7 @@ def render_focus_timer():
         if locked:
             st.warning("⚖️ Balanced Focus: Top goals temporarily locked. Spend a minimum on other goals to unlock.")
 
+        # Build choices with clean labels (title only; no 'plan:x')
         choices = []
         for _, r in goals_df.iterrows():
             title = r['title']
@@ -718,12 +750,10 @@ def render_focus_timer():
 
         c1, c2 = st.columns([1,2])
         with c1:
-            # Only show goal titles (no "plan:9" annotation in labels)
             options_labels = [lab + ("  🔒" if dis else "") for (lab,_,dis) in choices] or ["(no goals)"]
             selected_idx = st.selectbox("Weekly Goal", options=range(len(options_labels)), format_func=lambda i: options_labels[i], disabled=len(choices)==0)
             selected_gid = choices[selected_idx][1] if choices else None
             selected_title = choices[selected_idx][0] if choices else ""
-            st.caption("Tip: Allocations live in 📅 Weekly Planner. This selector only lists your active goals for the current week.")
         with c2:
             task = st.text_input("Task (micro-task)", placeholder="e.g., Revise Unit-2 notes")
 
@@ -749,10 +779,10 @@ def render_focus_timer():
                 st.session_state.task = ""
                 st.rerun()
     else:
-        # Custom (Unplanned) category flow (no goal_id)
+        # Custom Session flow (no goal_id)
         current_cats = get_user_settings(user).get("custom_categories", ["Learning","Projects","Research","Planning"])
         cat_options = current_cats + ["+ Add New"]
-        selected = st.selectbox("📂 Custom (Unplanned) Category", cat_options)
+        selected = st.selectbox("📂 Category", cat_options)
         if selected == "+ Add New":
             new_cat = st.text_input("New category", placeholder="e.g., Marketing")
             if new_cat and st.button("✅ Add Category"):
@@ -792,7 +822,7 @@ def render_focus_timer():
         today_data = df[df["date_only"] == today]
         work_today = today_data[today_data["pomodoro_type"]=="Work"]
         breaks_today = len(today_data[today_data["pomodoro_type"]=="Break"])
-        st.divider(); st.subheader("📊 Today's Summary")
+        st.divider(); st.subheader("📊 Today")
         col1,col2,col3,col4 = st.columns(4)
         with col1:
             st.metric("Work Sessions", len(work_today))
@@ -813,6 +843,8 @@ def render_focus_timer():
 # === JOURNAL (Notes + Reflection combined) ===
 def render_journal():
     st.header("🧾 Journal")
+    st.caption("Capture quick notes and end-of-day reflections to learn from your week.")
+
     tab1, tab2, tab3 = st.tabs(["Reflection", "Add Note", "Browse Notes"])
 
     user = st.session_state.user
@@ -885,6 +917,7 @@ def render_journal():
 # === ANALYTICS & REVIEW ===
 def render_analytics_review():
     st.header("📊 Analytics & Review")
+    st.caption("Weekly review and long-term trends — simple, actionable, and honest.")
 
     # Mode control (segmented if available, else radio)
     try:
@@ -905,7 +938,7 @@ def render_analytics_review():
 
     if mode == "Week Review":
         # ---- Week selection & plan ----
-        pick_date = st.date_input("📆 Review week of", value=st.session_state.review_week_date)
+        pick_date = st.date_input("📆 Review week of (Monday)", value=st.session_state.review_week_date)
         if pick_date != st.session_state.review_week_date:
             st.session_state.review_week_date = pick_date
             st.rerun()
@@ -932,28 +965,26 @@ def render_analytics_review():
         # Percent cards (N/A-safe)
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            st.metric("Plan Adherence", pct_or_dash(len(work_goal), total_planned))
+            st.metric("Plan Adherence", pct_or_dash(len(work_goal), total_planned), help="Actual goal-linked Pomodoros / Planned Pomodoros")
         with c2:
-            st.metric("Capacity Utilization", pct_or_dash(len(dfw), total_planned))
+            st.metric("Capacity Utilization", pct_or_dash(len(dfw), total_planned), help="All work Pomodoros / Planned Pomodoros")
         with c3:
-            st.metric("Deep-work %", pct_or_dash(deep, len(dfw)))
+            st.metric("Deep-work %", pct_or_dash(deep, len(dfw)), help="Sessions ≥ 23 minutes")
         with c4:
-            st.metric("Balance (Entropy)", f"{entropy_norm_from_counts(goal_counts):.2f}")
+            st.metric("Balance (Entropy)", f"{entropy_norm_from_counts(goal_counts):.2f}", help="0=skewed, 1=even across goals")
 
         c5, c6, c7, c8 = st.columns(4)
         with c5:
-            st.metric("Gini (Goals)", f"{gini_from_counts(goal_counts):.2f}")
+            st.metric("Gini (Goals)", f"{gini_from_counts(goal_counts):.2f}", help="Inequality of focus across goals")
         with c6:
-            st.metric("Custom (Unplanned) Share", pct_or_dash(len(work_custom), len(dfw)))
+            st.metric("Custom Share", pct_or_dash(len(work_custom), len(dfw)), help="Custom (non-goal) sessions / All work sessions")
         with c7:
             expected_breaks = len(dfw)
             skip = max(0, expected_breaks - len(dfb))
-            st.metric("Break Skip", pct_or_dash(skip, expected_breaks))
+            st.metric("Break Skip", pct_or_dash(skip, expected_breaks), help="Fewer breaks than work sessions")
         with c8:
             extend = max(0, len(dfb) - expected_breaks)
-            st.metric("Break Extend", pct_or_dash(extend, expected_breaks))
-
-        # Extra rhythm/discipline readouts
+            st.metric("Break Extend", pct_or_dash(extend, expected_breaks), help="More breaks than work sessions")
         st.caption(
             f"Avg Break = {(dfb['duration'].mean() if len(dfb) else 0.0):.1f} min • "
             f"Capacity = {total_planned if total_planned>0 else '—'} planned slots "
@@ -1003,16 +1034,15 @@ def render_analytics_review():
 
         d1, d2, d3, d4 = st.columns(4)
         with d1:
-            st.metric("Switching-Cost Index", f"{switch_idx*100:.0f}%")
+            st.metric("Switching-Cost Index", f"{switch_idx*100:.0f}%", help="% of session transitions that switch goal/category")
         with d2:
-            st.metric("Start-time σ", f"{start_sigma:.0f} min" if start_sigma is not None else "—")
+            st.metric("Start-time σ", f"{start_sigma:.0f} min" if start_sigma is not None else "—", help="Std dev of start times")
         with d3:
-            st.metric("Work/Break Ratio", f"{wb_ratio:.2f}")
+            st.metric("Work/Break Ratio", f"{wb_ratio:.2f}", help="Higher suggests fewer/shorter breaks")
         with d4:
-            st.metric("Chronotype Window", ph_disp)
+            st.metric("Chronotype Window", ph_disp, help="Most common start hour")
         st.caption(f"Task Granularity (median sessions per task): {med_sessions_per_task:.1f}" if med_sessions_per_task is not None else "Task Granularity: —")
 
-        # Duration sanity
         if not dfw.empty:
             off_blocks = len(dfw[(dfw["duration"] < 20) | (dfw["duration"] > 30)])
             st.caption("Durations look clean" if off_blocks == 0 else f"⚠️ {off_blocks} sessions deviate from 25±5 min")
