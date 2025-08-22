@@ -107,6 +107,27 @@ def time_to_minutes(tstr):
         return None
 
 # =========================
+# SESSION STATE DEFAULTS
+# =========================
+def init_session_state():
+    defaults = {
+        "start_time": None,
+        "is_break": False,
+        "task": "",
+        "user": None,
+        "page": "🎯 Focus Timer",
+        "planning_week_date": now_ist().date(),
+        "review_week_date": now_ist().date(),
+        "active_goal_id": None,
+        "active_goal_title": "",
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+init_session_state()
+
+# =========================
 # DATA ACCESS / CACHES
 # =========================
 @st.cache_data(ttl=300)
@@ -422,7 +443,6 @@ def this_week_glance_native(user: str, plan: Dict, df_work: pd.DataFrame):
     by_goal = dfw[dfw["goal_id"].notna()].groupby("goal_id").size().to_dict()
     titles = goal_title_map(user)
 
-    # Two-column grid
     cols = st.columns(2)
     idx = 0
     for gid in active_ids:
@@ -595,7 +615,6 @@ def render_timer_widget(auto_break: bool) -> bool:
         )
         st.balloons()
         st.success("🎉 Session complete!")
-        # Optional sound (user click)
         with st.expander("🔊 Playback"):
             st.audio(SOUND_PATH)
 
@@ -635,7 +654,6 @@ def render_focus_timer():
     user = st.session_state.user
     plan = get_or_create_weekly_plan(user, now_ist().date())
 
-    # Top: Daily target + glance + start-time sparkline
     df_all = get_user_sessions(user)
     today_progress, adaptive_goal, today_minutes = render_daily_goal(df_all)
     render_daily_target_planner(df_all, today_progress)
@@ -1207,18 +1225,22 @@ def render_analytics_review():
 # HEADER + ROUTER
 # =========================
 def main_header_and_router():
-    st.sidebar.markdown("### ⚙️ Admin")
-    if st.sidebar.button("Initialize Mongo Indexes"):
-        ensure_indexes()
-    export_sessions_csv(st.session_state.user if st.session_state.user else "user")
-
+    # Establish user before anything references session_state.user
     users = get_all_users()
     if not users:
         add_user("prashanth")
-        users = ["prashanth"]
-    if st.session_state.user not in users:
+        users = get_all_users()
+
+    if st.session_state.user is None or st.session_state.user not in users:
         st.session_state.user = users[0]
 
+    # Sidebar admin (safe to reference user now)
+    st.sidebar.markdown("### ⚙️ Admin")
+    if st.sidebar.button("Initialize Mongo Indexes"):
+        ensure_indexes()
+    export_sessions_csv(st.session_state.user)
+
+    # Top controls
     c1, c2, c3 = st.columns([2,3,2])
     with c1:
         idx = users.index(st.session_state.user) if st.session_state.user in users else 0
