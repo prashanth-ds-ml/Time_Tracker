@@ -106,6 +106,21 @@ def time_to_minutes(tstr):
     except Exception:
         return None
 
+def sound_alert():
+    """Autoplay a short sound immediately (won't wait for next rerun)."""
+    st.components.v1.html(f"""
+        <audio id="beep" autoplay>
+            <source src="{SOUND_PATH}" type="audio/mpeg">
+        </audio>
+        <script>
+            const audio = document.getElementById('beep');
+            if (audio) {{
+                audio.volume = 0.6;
+                audio.play().catch(() => {{ }});
+            }}
+        </script>
+    """, height=0)
+
 # =========================
 # SESSION STATE DEFAULTS
 # =========================
@@ -124,6 +139,14 @@ def init_session_state():
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+
+def reset_runtime_state_for_user():
+    """When switching users, clear volatile state to avoid cross-user artifacts."""
+    st.session_state.start_time = None
+    st.session_state.is_break = False
+    st.session_state.task = ""
+    st.session_state.active_goal_id = None
+    st.session_state.active_goal_title = ""
 
 init_session_state()
 
@@ -502,72 +525,94 @@ def render_weekly_planner():
 
     st.divider()
 
-    st.subheader("🎯 Goals (Top 3–4)")
-    with st.expander("Add / Update Goal", expanded=False):
-        g_title = st.text_input("Title", placeholder="e.g., UGC NET Paper 1")
-        g_type = st.selectbox("Type", ["Certification","Portfolio","Job Prep","Research","Startup","Learning","Other"], index=0)
-        g_weight = st.select_slider("Priority", options=[1,2,3,4,5,6], value=2, help="High=3, Medium=2, Low=1")
-        g_status = st.selectbox("Status", ["New","In Progress","Completed","On Hold","Archived"], index=0)
-        if st.button("💾 Save Goal"):
-            if g_title.strip():
-                upsert_goal(user, g_title.strip(), int(g_weight), g_type, g_status)
-                st.success("Saved goal")
-                fetch_goals.clear()
-                st.rerun()
-            else:
-                st.warning("Please provide a title")
-
+    # ---- NEW: Adjust Priorities any time ----
+    st.subheader("🎯 Goals & Priority Weights")
     goals_df = fetch_goals(user, statuses=["New","In Progress"])
     if goals_df.empty:
-        st.info("Add 3–4 goals above to plan this week.")
+        with st.expander("Add Goal"):
+            g_title = st.text_input("Title", placeholder="e.g., UGC NET Paper 1")
+            g_type = st.selectbox("Type", ["Certification","Portfolio","Job Prep","Research","Startup","Learning","Other"], index=0)
+            g_weight = st.select_slider("Priority", options=[1,2,3], value=2, help="High=3, Medium=2, Low=1")
+            if st.button("💾 Save Goal"):
+                if g_title.strip():
+                    upsert_goal(user, g_title.strip(), int(g_weight), g_type, "New")
+                    fetch_goals.clear()
+                    st.success("Saved goal")
+                    st.rerun()
+        st.info("Add 3–4 goals to plan the week.")
         return
 
-    st.markdown("**Active Goals**")
-    show = goals_df[["_id","title","goal_type","priority_weight","status"]].rename(
-        columns={"_id":"Goal ID","goal_type":"Type","priority_weight":"Weight"}
-    )
-    st.dataframe(show, use_container_width=True, hide_index=True)
+    # Editable priority weights
+    weights = {}
+    cols = st.columns(min(4, max(1, len(goals_df))))
+    for i, (_, row) in enumerate(goals_df.iterrows()):
+        with cols[i % len(cols)]:
+            st.write(f"**{row['title']}**")
+            w = st.select_slider("Priority", options=[1,2,3], value=int(row.get("priority_weight",2)), key=f"w_{row['_id']}")
+            weights[row["_id"]] = int(w)
+    if st.button("💾 Update Priorities"):
+        for gid, w in weights.items():
+            collection_goals.update_one({"_id": gid}, {"$set": {"priority_weight": int(w), "updated_at": datetime.utcnow()}})
+        fetch_goals.clear()
+        st.success("Priorities updated.")
+        st.rerun()
 
     st.divider()
 
+    # ---- Allocation (edit always allowed, but guard overwrite feeling) ----
     st.subheader("🧮 Allocate Weekly Pomodoros")
     wd_count, we_count = week_day_counts(week_start)
     total_poms = compute_weekly_capacity(get_user_settings(user), weekdays=wd_count, weekend_days=we_count)
-    weight_map = {row["_id"]: int(row["priority_weight"]) for _, row in goals_df.iterrows()}
+    weight_map = {row["_id"]: int(weights.get(row["_id"], row["priority_weight"])) for _, row in goals_df.iterrows()}
     auto = proportional_allocation(total_poms, weight_map)
-    st.caption("Adjust numbers; we’ll keep the total consistent.")
 
-    # Prevent accidental overwrite
+    # Copy previous week's leftovers into current plan
+    with st.expander("↪️ Rollover unfinished from last week", expanded=False):
+        prev_start = week_start - timedelta(days=7)
+        if st.button(f"Compute & Rollover from {prev_start} → {prev_start+timedelta(days=6)}"):
+            # Calculate carry = planned - actual for prev week (goals only, >0)
+            prev_plan = collection_plans.find_one({"_id": f"{user}|{prev_start.isoformat()}"}) or {}
+            prev_alloc = prev_plan.get("allocations", {}) or {}
+            if not prev_alloc:
+                st.warning("No previous plan found.")
+            else:
+                df_all_prev = get_user_sessions(user)
+                mask_prev = (df_all_prev["date"].dt.date >= prev_start) & (df_all_prev["date"].dt.date <= prev_start+timedelta(days=6))
+                dfw_prev = df_all_prev[mask_prev & (df_all_prev["pomodoro_type"]=="Work") & (df_all_prev["goal_id"].notna())]
+                actual_prev = dfw_prev.groupby("goal_id").size().to_dict()
+                carry = {gid: max(0, int(planned) - int(actual_prev.get(gid, 0))) for gid, planned in prev_alloc.items()}
+                carry = {gid: v for gid, v in carry.items() if v > 0}
+                if not carry:
+                    st.info("No unfinished items to rollover.")
+                else:
+                    # merge into current plan
+                    curr_alloc = dict(plan.get("allocations", {}))
+                    curr_goals = set(plan.get("goals", []))
+                    for gid, add in carry.items():
+                        curr_goals.add(gid)
+                        curr_alloc[gid] = int(curr_alloc.get(gid, 0)) + int(add)
+                    save_plan_allocations(plan["_id"], list(curr_goals), curr_alloc)
+                    st.success("Rolled over unfinished poms into this week.")
+                    st.experimental_rerun()
+
+    # Prevent accidental overwrite messaging
     plan_has_alloc = bool(plan.get("allocations"))
     if plan_has_alloc:
-        st.warning("A plan already exists for this week.")
-    edit_mode = st.toggle("Enable edit", value=(not plan_has_alloc))
-
-    # Copy previous week if empty
-    prev_start = week_start - timedelta(days=7)
-    prev_plan = collection_plans.find_one({"_id": f"{user}|{prev_start.isoformat()}"})
-    if (not plan.get("allocations")) and prev_plan and prev_plan.get("allocations"):
-        if st.button(f"📋 Copy last week's plan ({prev_start} → {prev_start+timedelta(days=6)})"):
-            save_plan_allocations(plan["_id"], list(prev_plan["allocations"].keys()), prev_plan["allocations"])
-            st.success("Copied last week")
-            st.rerun()
+        st.caption("A plan already exists for this week. Adjust and save to update.")
 
     edited = {}
-    cols = st.columns(min(4, len(auto)) if len(auto) > 0 else 1)
-    i = 0
-    for _, row in goals_df.iterrows():
-        with cols[i % len(cols)]:
+    cols2 = st.columns(min(4, max(1, len(goals_df))))
+    for i, (_, row) in enumerate(goals_df.iterrows()):
+        with cols2[i % len(cols2)]:
             default_val = int(plan.get("allocations", {}).get(row['_id'], auto[row['_id']]))
             val = st.number_input(
                 f"{row['title']}", min_value=0, max_value=total_poms,
-                value=default_val, step=1, key=f"alloc_{row['_id']}",
-                disabled=not edit_mode
+                value=default_val, step=1, key=f"alloc_{row['_id']}"
             )
             edited[row["_id"]] = int(val)
-        i += 1
 
     sum_edit = sum(edited.values())
-    if edit_mode and sum_edit != total_poms:
+    if sum_edit != total_poms:
         st.warning(f"Allocations sum to {sum_edit}, not {total_poms}.")
         if st.button("🔁 Normalize to total"):
             edited = proportional_allocation(total_poms, {gid: max(1, v) for gid, v in edited.items()})
@@ -576,7 +621,7 @@ def render_weekly_planner():
             st.rerun()
 
     btn_label = "📌 Save Weekly Plan" if not plan_has_alloc else "📌 Update Weekly Plan"
-    if st.button(btn_label, type="primary", disabled=not edit_mode):
+    if st.button(btn_label, type="primary"):
         save_plan_allocations(plan["_id"], list(edited.keys()), edited)
         st.success("Weekly plan saved!")
         st.rerun()
@@ -603,7 +648,7 @@ def render_timer_widget(auto_break: bool) -> bool:
         st.rerun()
         return True
     else:
-        # Finish session
+        # Finish current session
         was_break = st.session_state.is_break
         save_pomodoro_session(
             user=st.session_state.user,
@@ -613,19 +658,19 @@ def render_timer_widget(auto_break: bool) -> bool:
             task=st.session_state.task,
             category_label=st.session_state.active_goal_title
         )
+        # Play sound immediately BEFORE any rerun/auto-break starts
+        sound_alert()
         st.balloons()
         st.success("🎉 Session complete!")
-        with st.expander("🔊 Playback"):
-            st.audio(SOUND_PATH)
 
-        # Reset state
+        # Reset work state
         st.session_state.start_time = None
         st.session_state.is_break = False
         st.session_state.task = ""
         st.session_state.active_goal_id = None
         st.session_state.active_goal_title = ""
 
-        # Auto-start break after WORK
+        # Auto-start 5m break after WORK (sound already played)
         if (not was_break) and auto_break:
             st.toast("☕ Auto-starting a 5-minute break")
             st.session_state.start_time = time.time()
@@ -680,14 +725,15 @@ def render_focus_timer():
         if locked:
             st.warning("⚖️ Balanced Focus: top goals are temporarily locked. Do minimum on others to unlock.")
 
-        titles = goals_df[["title","_id"]].values.tolist()
-        labels_only = [t for (t, _) in titles] or ["(no goals)"]
+        # titles only (no 'plan:9' clutter)
+        titles_pairs = goals_df[["title","_id"]].values.tolist()
+        labels_only = [t for (t, _) in titles_pairs] or ["(no goals)"]
 
         c1, c2 = st.columns([1,2])
         with c1:
             sel_idx = st.selectbox("Weekly Goal", options=range(len(labels_only)), format_func=lambda i: labels_only[i], disabled=len(labels_only)==1 and labels_only[0]=="(no goals)")
-            selected_gid = titles[sel_idx][1] if titles else None
-            selected_title = titles[sel_idx][0] if titles else ""
+            selected_gid = titles_pairs[sel_idx][1] if titles_pairs else None
+            selected_title = titles_pairs[sel_idx][0] if titles_pairs else ""
             if selected_gid in locked:
                 st.caption("🔒 This goal is locked for balance. Pick another for now.")
         with c2:
@@ -699,7 +745,7 @@ def render_focus_timer():
 
         colw, colb = st.columns(2)
         with colw:
-            disabled = (not task.strip()) or (selected_gid in locked if selected_gid else False) or (len(titles)==0)
+            disabled = (not task.strip()) or (selected_gid in locked if selected_gid else False) or (len(titles_pairs)==0)
             if st.button("▶️ Start Work (25m)", type="primary", use_container_width=True, disabled=disabled):
                 st.session_state.start_time = time.time()
                 st.session_state.is_break = False
@@ -1033,7 +1079,7 @@ def render_analytics_review():
             fig_rr.update_layout(height=330, legend_title="")
             st.plotly_chart(fig_rr, use_container_width=True)
 
-        # Close Out & Rollover
+        # Close Out & Rollover (remains as before)
         has_planned = bool(planned_alloc)
         has_goal_actuals = (work_goal.shape[0] > 0)
         if has_planned or has_goal_actuals:
@@ -1091,7 +1137,7 @@ def render_analytics_review():
             st.info("Nothing to close this week yet. Log some goal-linked sessions first.")
 
     else:
-        # Trends mode
+        # Trends mode — beefed up insights
         today = now_ist().date()
 
         st.subheader("Overview")
@@ -1120,6 +1166,48 @@ def render_analytics_review():
             fig.update_layout(height=400, showlegend=False)
             st.plotly_chart(fig, use_container_width=True)
 
+        # ---- Insights block (beefed up)
+        st.markdown("#### 🔍 Insights (Last 30 days)")
+        df30 = df_work[df_work["date_only"] >= (today - timedelta(days=30))].copy()
+        if not df30.empty:
+            # Best day (by minutes)
+            by_day = df30.groupby("date_only")["duration"].sum().sort_values(ascending=False)
+            best_day = by_day.index[0] if len(by_day) else None
+            best_day_min = int(by_day.iloc[0]) if len(by_day) else 0
+
+            # Focus window (mode hour)
+            starts = [time_to_minutes(x) for x in df30["time"].tolist() if isinstance(x, str)]
+            starts = [s for s in starts if s is not None]
+            if starts:
+                top_hour = pd.Series([s//60 for s in starts]).mode().iloc[0]
+                ampm = "AM" if top_hour < 12 else "PM"
+                hour_disp = f"{(top_hour if 1 <= top_hour <= 12 else (12 if top_hour%12==0 else top_hour%12))}{ampm}"
+            else:
+                hour_disp = "—"
+
+            # Category tilt
+            by_cat = df30.groupby("category")["duration"].sum().sort_values(ascending=False)
+            if len(by_cat) > 0:
+                top_cat = by_cat.index[0]
+                top_share = safe_div(by_cat.iloc[0], by_cat.sum())*100
+            else:
+                top_cat, top_share = "—", 0
+
+            # Break hygiene
+            df30_break = df_all[(df_all["pomodoro_type"]=="Break") & (df_all["date_only"] >= (today - timedelta(days=30)))]
+            skip_rate = pct_or_dash(max(0, len(df30) - len(df30_break)), len(df30))
+            extend_rate = pct_or_dash(max(0, len(df30_break) - len(df30)), len(df30))
+
+            cI1, cI2, cI3, cI4 = st.columns(4)
+            with cI1:
+                st.metric("Best day (mins)", f"{best_day_min}", f"{best_day.strftime('%a %d %b') if best_day else '—'}")
+            with cI2:
+                st.metric("Focus window", hour_disp)
+            with cI3:
+                st.metric("Top category share", f"{top_share:.0f}%")
+            with cI4:
+                st.metric("Break skip / extend", f"{skip_rate} / {extend_rate}")
+
         st.divider()
         st.subheader("🎯 Category Deep Dive")
         time_filter = st.selectbox("Time Period", ["Last 7 days", "Last 30 days", "All time"], index=1)
@@ -1146,8 +1234,8 @@ def render_analytics_review():
                                hole=0.4, color_discrete_sequence=px.colors.qualitative.Set3)
             total_hours = int(total_time) // 60
             total_mins = int(total_time) % 60
-            center_text = f"{total_hours}h {total_mins}m" if total_hours > 0 else f"{total_mins}m"
-            fig_donut.add_annotation(text=f"<b>Total</b><br>{center_text}", x=0.5, y=0.5, showarrow=False)
+            center_text = f"<b>Total</b><br>{total_hours}h {total_mins}m" if total_hours > 0 else f"<b>Total</b><br>{total_mins}m"
+            fig_donut.add_annotation(text=center_text, x=0.5, y=0.5, showarrow=False)
             fig_donut.update_layout(height=400, showlegend=True, title_x=0.5)
             st.plotly_chart(fig_donut, use_container_width=True)
         with colB:
@@ -1231,6 +1319,7 @@ def main_header_and_router():
         add_user("prashanth")
         users = get_all_users()
 
+    # If currently selected user missing, pick the first
     if st.session_state.user is None or st.session_state.user not in users:
         st.session_state.user = users[0]
 
@@ -1243,10 +1332,18 @@ def main_header_and_router():
     # Top controls
     c1, c2, c3 = st.columns([2,3,2])
     with c1:
-        idx = users.index(st.session_state.user) if st.session_state.user in users else 0
-        sel = st.selectbox("👤 User", users, index=idx, key="user_select")
+        try:
+            idx = users.index(st.session_state.user) if st.session_state.user in users else 0
+        except Exception:
+            idx = 0
+        sel = st.selectbox("👤 User", users, index=idx, key="user_select_header")
         if sel != st.session_state.user:
             st.session_state.user = sel
+            # Clear volatile state and caches on user switch
+            reset_runtime_state_for_user()
+            get_user_sessions.clear()
+            get_user_settings.clear()
+            fetch_goals.clear()
             st.rerun()
     with c2:
         pages = [
@@ -1263,6 +1360,7 @@ def main_header_and_router():
             if st.button("Add", key="add_user_btn") and u:
                 if add_user(u.strip()):
                     st.session_state.user = u.strip()
+                    reset_runtime_state_for_user()
                     st.success("✅ User added!")
                     st.rerun()
                 else:
