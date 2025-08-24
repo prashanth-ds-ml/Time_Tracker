@@ -507,28 +507,34 @@ def render_weekly_planner():
         st.session_state.planning_week_date = pick_date
         st.rerun()
 
+    # --- Capacity controls (live) ---
     settings = get_user_settings(user)
-    plan = get_or_create_weekly_plan(user, week_start)
-
     colA, colB, colC = st.columns(3)
     with colA:
-        wp = st.number_input("Weekday avg", 0, 12, value=settings["weekday_poms"])
+        wp = st.number_input("Weekday avg", 0, 12, value=int(settings["weekday_poms"]))
     with colB:
-        we = st.number_input("Weekend avg", 0, 12, value=settings["weekend_poms"])
+        we = st.number_input("Weekend avg", 0, 12, value=int(settings["weekend_poms"]))
     with colC:
         wd_count, we_count = week_day_counts(week_start)
-        total = compute_weekly_capacity({"weekday_poms": wp, "weekend_poms": we}, weekdays=wd_count, weekend_days=we_count)
-        st.metric(f"Capacity {week_start} → {week_end}", f"{total}")
+        # IMPORTANT: use the CURRENT inputs here (not the saved settings)
+        total_live = compute_weekly_capacity(
+            {"weekday_poms": wp, "weekend_poms": we},
+            weekdays=wd_count, weekend_days=we_count
+        )
+        st.metric(f"Capacity {week_start} → {week_end}", f"{total_live}")
         if (wp != settings["weekday_poms"]) or (we != settings["weekend_poms"]):
-            if st.button("💾 Save Defaults", use_container_width=True):
-                users_collection.update_one({"username": user}, {"$set": {"weekday_poms": int(wp), "weekend_poms": int(we)}})
-                st.success("Saved defaults")
+            if st.button("💾 Save as Defaults", use_container_width=True):
+                users_collection.update_one(
+                    {"username": user},
+                    {"$set": {"weekday_poms": int(wp), "weekend_poms": int(we)}}
+                )
                 get_user_settings.clear()
+                st.success("Saved new defaults")
                 st.rerun()
 
     st.divider()
 
-    # ---- Editable priorities (any time)
+    # --- Editable priorities (any time) ---
     st.subheader("🎯 Goals & Priority Weights")
     goals_df = fetch_goals(user, statuses=["New","In Progress"])
     if goals_df.empty:
@@ -561,13 +567,13 @@ def render_weekly_planner():
 
     st.divider()
 
-    # ---- Allocation + rollover
+    # --- Plan doc & auto-allocation (using LIVE capacity) ---
+    plan = get_or_create_weekly_plan(user, week_start)
     st.subheader("🧮 Allocate Weekly Pomodoros")
-    wd_count, we_count = week_day_counts(week_start)
-    total_poms = compute_weekly_capacity(get_user_settings(user), weekdays=wd_count, weekend_days=we_count)
     weight_map = {row["_id"]: int(weights.get(row["_id"], row["priority_weight"])) for _, row in goals_df.iterrows()}
-    auto = proportional_allocation(total_poms, weight_map)
+    auto = proportional_allocation(total_live, weight_map)
 
+    # Rollover expander
     with st.expander("↪️ Rollover unfinished from last week", expanded=False):
         prev_start = week_start - timedelta(days=7)
         if st.button(f"Compute & Rollover from {prev_start} → {prev_start+timedelta(days=6)}"):
@@ -592,28 +598,34 @@ def render_weekly_planner():
                         curr_alloc[gid] = int(curr_alloc.get(gid, 0)) + int(add)
                     save_plan_allocations(plan["_id"], list(curr_goals), curr_alloc)
                     st.success("Rolled over unfinished poms into this week.")
-                    st.experimental_rerun()
+                    st.rerun()
 
     plan_has_alloc = bool(plan.get("allocations"))
     if plan_has_alloc:
         st.caption("A plan already exists for this week. Adjust and save to update.")
 
+    # --- Allocation editors (clamped to LIVE capacity) ---
     edited = {}
     cols2 = st.columns(min(4, max(1, len(goals_df))))
     for i, (_, row) in enumerate(goals_df.iterrows()):
         with cols2[i % len(cols2)]:
-            default_val = int(plan.get("allocations", {}).get(row['_id'], auto[row['_id']]))
+            plan_val = int(plan.get("allocations", {}).get(row['_id'], 0))
+            auto_val = int(auto.get(row['_id'], 0))
+            default_val = plan_val if plan_has_alloc else auto_val
+            # clamp default to the current capacity to avoid number_input errors
+            default_val = max(0, min(default_val, int(total_live)))
             val = st.number_input(
-                f"{row['title']}", min_value=0, max_value=total_poms,
+                f"{row['title']}",
+                min_value=0, max_value=int(total_live),
                 value=default_val, step=1, key=f"alloc_{row['_id']}"
             )
             edited[row["_id"]] = int(val)
 
     sum_edit = sum(edited.values())
-    if sum_edit != total_poms:
-        st.warning(f"Allocations sum to {sum_edit}, not {total_poms}.")
-        if st.button("🔁 Normalize to total"):
-            edited = proportional_allocation(total_poms, {gid: max(1, v) for gid, v in edited.items()})
+    if sum_edit != total_live:
+        st.warning(f"Allocations sum to {sum_edit}, not {total_live}.")
+        if st.button("🔁 Normalize to capacity"):
+            edited = proportional_allocation(int(total_live), {gid: max(1, v) for gid, v in edited.items()})
             for gid, v in edited.items():
                 st.session_state[f"alloc_{gid}"] = v
             st.rerun()
