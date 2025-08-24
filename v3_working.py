@@ -147,9 +147,6 @@ def reset_runtime_state_for_user():
     st.session_state.task = ""
     st.session_state.active_goal_id = None
     st.session_state.active_goal_title = ""
-    # reset week pickers to today for the new user
-    st.session_state.planning_week_date = now_ist().date()
-    st.session_state.review_week_date = now_ist().date()
 
 init_session_state()
 
@@ -528,7 +525,7 @@ def render_weekly_planner():
 
     st.divider()
 
-    # ---- Editable priorities (any time)
+    # ---- NEW: Adjust Priorities any time ----
     st.subheader("🎯 Goals & Priority Weights")
     goals_df = fetch_goals(user, statuses=["New","In Progress"])
     if goals_df.empty:
@@ -545,6 +542,7 @@ def render_weekly_planner():
         st.info("Add 3–4 goals to plan the week.")
         return
 
+    # Editable priority weights
     weights = {}
     cols = st.columns(min(4, max(1, len(goals_df))))
     for i, (_, row) in enumerate(goals_df.iterrows()):
@@ -561,16 +559,18 @@ def render_weekly_planner():
 
     st.divider()
 
-    # ---- Allocation + rollover
+    # ---- Allocation (edit always allowed, but guard overwrite feeling) ----
     st.subheader("🧮 Allocate Weekly Pomodoros")
     wd_count, we_count = week_day_counts(week_start)
     total_poms = compute_weekly_capacity(get_user_settings(user), weekdays=wd_count, weekend_days=we_count)
     weight_map = {row["_id"]: int(weights.get(row["_id"], row["priority_weight"])) for _, row in goals_df.iterrows()}
     auto = proportional_allocation(total_poms, weight_map)
 
+    # Copy previous week's leftovers into current plan
     with st.expander("↪️ Rollover unfinished from last week", expanded=False):
         prev_start = week_start - timedelta(days=7)
         if st.button(f"Compute & Rollover from {prev_start} → {prev_start+timedelta(days=6)}"):
+            # Calculate carry = planned - actual for prev week (goals only, >0)
             prev_plan = collection_plans.find_one({"_id": f"{user}|{prev_start.isoformat()}"}) or {}
             prev_alloc = prev_plan.get("allocations", {}) or {}
             if not prev_alloc:
@@ -585,6 +585,7 @@ def render_weekly_planner():
                 if not carry:
                     st.info("No unfinished items to rollover.")
                 else:
+                    # merge into current plan
                     curr_alloc = dict(plan.get("allocations", {}))
                     curr_goals = set(plan.get("goals", []))
                     for gid, add in carry.items():
@@ -594,6 +595,7 @@ def render_weekly_planner():
                     st.success("Rolled over unfinished poms into this week.")
                     st.experimental_rerun()
 
+    # Prevent accidental overwrite messaging
     plan_has_alloc = bool(plan.get("allocations"))
     if plan_has_alloc:
         st.caption("A plan already exists for this week. Adjust and save to update.")
@@ -723,7 +725,7 @@ def render_focus_timer():
         if locked:
             st.warning("⚖️ Balanced Focus: top goals are temporarily locked. Do minimum on others to unlock.")
 
-        # titles only
+        # titles only (no 'plan:9' clutter)
         titles_pairs = goals_df[["title","_id"]].values.tolist()
         labels_only = [t for (t, _) in titles_pairs] or ["(no goals)"]
 
@@ -954,7 +956,7 @@ def render_analytics_review():
             skip = max(0, expected_breaks - len(dfb))
             st.metric("Break Skip", pct_or_dash(skip, expected_breaks))
         with c8:
-            extend = max(0, len(dfb) - len(dfw))
+            extend = max(0, len(dfb) - expected_breaks)
             st.metric("Break Extend", pct_or_dash(extend, expected_breaks))
 
         st.caption(
@@ -1077,7 +1079,7 @@ def render_analytics_review():
             fig_rr.update_layout(height=330, legend_title="")
             st.plotly_chart(fig_rr, use_container_width=True)
 
-        # Close Out & Rollover
+        # Close Out & Rollover (remains as before)
         has_planned = bool(planned_alloc)
         has_goal_actuals = (work_goal.shape[0] > 0)
         if has_planned or has_goal_actuals:
@@ -1135,7 +1137,7 @@ def render_analytics_review():
             st.info("Nothing to close this week yet. Log some goal-linked sessions first.")
 
     else:
-        # Trends mode — with insights
+        # Trends mode — beefed up insights
         today = now_ist().date()
 
         st.subheader("Overview")
@@ -1164,14 +1166,16 @@ def render_analytics_review():
             fig.update_layout(height=400, showlegend=False)
             st.plotly_chart(fig, use_container_width=True)
 
-        # Insights block (Last 30 days)
+        # ---- Insights block (beefed up)
         st.markdown("#### 🔍 Insights (Last 30 days)")
         df30 = df_work[df_work["date_only"] >= (today - timedelta(days=30))].copy()
         if not df30.empty:
+            # Best day (by minutes)
             by_day = df30.groupby("date_only")["duration"].sum().sort_values(ascending=False)
             best_day = by_day.index[0] if len(by_day) else None
             best_day_min = int(by_day.iloc[0]) if len(by_day) else 0
 
+            # Focus window (mode hour)
             starts = [time_to_minutes(x) for x in df30["time"].tolist() if isinstance(x, str)]
             starts = [s for s in starts if s is not None]
             if starts:
@@ -1181,6 +1185,7 @@ def render_analytics_review():
             else:
                 hour_disp = "—"
 
+            # Category tilt
             by_cat = df30.groupby("category")["duration"].sum().sort_values(ascending=False)
             if len(by_cat) > 0:
                 top_cat = by_cat.index[0]
@@ -1188,6 +1193,7 @@ def render_analytics_review():
             else:
                 top_cat, top_share = "—", 0
 
+            # Break hygiene
             df30_break = df_all[(df_all["pomodoro_type"]=="Break") & (df_all["date_only"] >= (today - timedelta(days=30)))]
             skip_rate = pct_or_dash(max(0, len(df30) - len(df30_break)), len(df30))
             extend_rate = pct_or_dash(max(0, len(df30_break) - len(df30)), len(df30))
@@ -1313,6 +1319,7 @@ def main_header_and_router():
         add_user("prashanth")
         users = get_all_users()
 
+    # If currently selected user missing, pick the first
     if st.session_state.user is None or st.session_state.user not in users:
         st.session_state.user = users[0]
 
