@@ -516,7 +516,6 @@ def render_weekly_planner():
         we = st.number_input("Weekend avg", 0, 12, value=int(settings["weekend_poms"]))
     with colC:
         wd_count, we_count = week_day_counts(week_start)
-        # IMPORTANT: use the CURRENT inputs here (not the saved settings)
         total_live = compute_weekly_capacity(
             {"weekday_poms": wp, "weekend_poms": we},
             weekdays=wd_count, weekend_days=we_count
@@ -551,16 +550,34 @@ def render_weekly_planner():
         st.info("Add 3–4 goals to plan the week.")
         return
 
+    def sanitize_weight(v, default=2):
+        try:
+            vv = int(v)
+        except Exception:
+            vv = default
+        return vv if vv in (1, 2, 3) else default
+
     weights = {}
     cols = st.columns(min(4, max(1, len(goals_df))))
     for i, (_, row) in enumerate(goals_df.iterrows()):
         with cols[i % len(cols)]:
             st.write(f"**{row['title']}**")
-            w = st.select_slider("Priority", options=[1,2,3], value=int(row.get("priority_weight",2)), key=f"w_{row['_id']}")
+            default_w = sanitize_weight(row.get("priority_weight", 2))
+            w = st.select_slider(
+                "Priority",
+                options=[1, 2, 3],
+                value=default_w,
+                key=f"w_{row['_id']}",
+                help="High=3, Medium=2, Low=1"
+            )
             weights[row["_id"]] = int(w)
+
     if st.button("💾 Update Priorities"):
         for gid, w in weights.items():
-            collection_goals.update_one({"_id": gid}, {"$set": {"priority_weight": int(w), "updated_at": datetime.utcnow()}})
+            collection_goals.update_one(
+                {"_id": gid},
+                {"$set": {"priority_weight": int(w), "updated_at": datetime.utcnow()}}
+            )
         fetch_goals.clear()
         st.success("Priorities updated.")
         st.rerun()
@@ -570,8 +587,9 @@ def render_weekly_planner():
     # --- Plan doc & auto-allocation (using LIVE capacity) ---
     plan = get_or_create_weekly_plan(user, week_start)
     st.subheader("🧮 Allocate Weekly Pomodoros")
-    weight_map = {row["_id"]: int(weights.get(row["_id"], row["priority_weight"])) for _, row in goals_df.iterrows()}
-    auto = proportional_allocation(total_live, weight_map)
+    weight_map = {row["_id"]: int(weights.get(row["_id"], sanitize_weight(row.get("priority_weight", 2))))
+                  for _, row in goals_df.iterrows()}
+    auto = proportional_allocation(int(total_live), weight_map)
 
     # Rollover expander
     with st.expander("↪️ Rollover unfinished from last week", expanded=False):
@@ -607,25 +625,25 @@ def render_weekly_planner():
     # --- Allocation editors (clamped to LIVE capacity) ---
     edited = {}
     cols2 = st.columns(min(4, max(1, len(goals_df))))
+    cap = int(total_live)
     for i, (_, row) in enumerate(goals_df.iterrows()):
         with cols2[i % len(cols2)]:
             plan_val = int(plan.get("allocations", {}).get(row['_id'], 0))
             auto_val = int(auto.get(row['_id'], 0))
             default_val = plan_val if plan_has_alloc else auto_val
-            # clamp default to the current capacity to avoid number_input errors
-            default_val = max(0, min(default_val, int(total_live)))
+            default_val = max(0, min(default_val, cap))
             val = st.number_input(
                 f"{row['title']}",
-                min_value=0, max_value=int(total_live),
+                min_value=0, max_value=cap,
                 value=default_val, step=1, key=f"alloc_{row['_id']}"
             )
             edited[row["_id"]] = int(val)
 
     sum_edit = sum(edited.values())
-    if sum_edit != total_live:
-        st.warning(f"Allocations sum to {sum_edit}, not {total_live}.")
+    if sum_edit != cap:
+        st.warning(f"Allocations sum to {sum_edit}, not {cap}.")
         if st.button("🔁 Normalize to capacity"):
-            edited = proportional_allocation(int(total_live), {gid: max(1, v) for gid, v in edited.items()})
+            edited = proportional_allocation(cap, {gid: max(1, v) for gid, v in edited.items()})
             for gid, v in edited.items():
                 st.session_state[f"alloc_{gid}"] = v
             st.rerun()
