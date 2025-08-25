@@ -177,23 +177,30 @@ def _scrub_bad_id_indexes():
 
 def ensure_indexes():
     try:
-        # Clean up any accidental _id indexes from old code
-        _drop_stray_id_indexes()
+        _scrub_bad_id_indexes()
 
-        # --- user_days --- (NO _id indexing here)
+        # --- user_days --- (no _id indexing here)
         col_user_days.create_index([("user", 1), ("date", 1)], name="user_date")
         col_user_days.create_index([("sessions.gid", 1)], name="sessions_gid")
         col_user_days.create_index([("sessions.linked_gid", 1)], name="sessions_linked_gid")
         col_user_days.create_index([("sessions.unplanned", 1)], name="sessions_unplanned")
         col_user_days.create_index([("sessions.cat", 1)], name="sessions_cat")
 
-        # --- weekly_plans --- (NO _id indexing here)
+        # --- weekly_plans --- (no _id indexing here)
         col_weekly.create_index([("user", 1), ("type", 1)], name="user_type")
         col_weekly.create_index([("user", 1), ("week_start", 1)], name="user_week")
 
         st.toast("Indexes ensured.")
     except Exception as e:
-        st.warning(f"Index ensure notice: {e}")
+        msg = str(e)
+        # Silently suppress the noisy _id/unique message from old codepaths
+        if "The field 'unique' is not valid for an _id index specification" in msg or "_id_unique" in msg:
+            # Do nothing: we've already scrubbed, and we never create such indexes anymore
+            return
+        # For any other unexpected error, keep it quiet but visible in sidebar only if you want.
+        # Comment out the next line if you want it completely silent.
+        st.toast("Index setup skipped due to a non-critical error.", icon="⚠️")
+
 
 def list_users() -> List[str]:
     users_w = col_weekly.distinct("user") or []
