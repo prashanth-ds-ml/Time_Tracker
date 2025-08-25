@@ -1,259 +1,277 @@
-# weekly_planner.py
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta, date
-
+from datetime import timedelta
 from user_management import (
-    now_ist, week_bounds_ist, week_day_counts,
-    get_user_settings, get_user_sessions, fetch_goals, upsert_goal, goal_title_map,
-    collection_plans, collection_goals
+    get_user_settings, week_bounds_ist, week_day_counts, compute_weekly_capacity,
+    fetch_goals, upsert_goal, proportional_allocation,
+    get_user_sessions, get_or_create_weekly_plan, save_plan_allocations,
+    now_ist
 )
 
-# ---- Capacity & allocation helpers ----
-def compute_weekly_capacity(settings, weekdays: int = 5, weekend_days: int = 2) -> int:
-    return settings["weekday_poms"] * weekdays + settings["weekend_poms"] * weekend_days
+def _goal_dataframe_for_editor(goals_df: pd.DataFrame) -> pd.DataFrame:
+    # Editable subset
+    view = goals_df[["_id","title","goal_type","priority_weight","status"]].copy()
+    view.rename(columns={
+        "_id":"goal_id","goal_type":"Type","priority_weight":"Weight","status":"Status","title":"Title"
+    }, inplace=True)
+    return view
 
-def proportional_allocation(total: int, weights: dict) -> dict:
-    total_w = max(1, sum(max(1, int(w)) for w in weights.values()))
-    raw = {gid: (max(1, int(w)) / total_w) * total for gid, w in weights.items()}
-    allocated = {gid: int(v) for gid, v in raw.items()}
-    diff = total - sum(allocated.values())
-    if diff != 0:
-        fracs = sorted(((gid, raw[gid] - int(raw[gid])) for gid in raw), key=lambda x: x[1], reverse=True)
-        idx = 0
-        while diff != 0 and fracs:
-            gid = fracs[idx % len(fracs)][0]
-            allocated[gid] += 1 if diff > 0 else -1
-            diff += -1 if diff > 0 else 1
-            idx += 1
-    return allocated
-
-# ---- Plans CRUD ----
-def get_or_create_weekly_plan(username: str, d: date) -> dict:
-    week_start, week_end = week_bounds_ist(d)
-    pid = f"{username}|{week_start.isoformat()}"
-    plan = collection_plans.find_one({"_id": pid})
-    if plan:
-        return plan
-    settings = get_user_settings(username)
-    wd, we = week_day_counts(week_start)
-    total_poms = compute_weekly_capacity(settings, weekdays=wd, weekend_days=we)
-    doc = {
-        "_id": pid,
-        "user": username,
-        "week_start": week_start.isoformat(),
-        "week_end": week_end.isoformat(),
-        "total_poms": total_poms,
-        "goals": [],
-        "allocations": {},
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow()
-    }
-    collection_plans.insert_one(doc)
-    return doc
-
-def save_plan_allocations(plan_id: str, goals: list, allocations: dict):
-    goals_unique = sorted(set(goals))
-    clean_alloc = {gid: int(allocations.get(gid, 0)) for gid in goals_unique}
-    collection_plans.update_one(
-        {"_id": plan_id},
-        {"$set": {"goals": goals_unique, "allocations": clean_alloc, "updated_at": datetime.utcnow()}}
-    )
-
-def sanitize_weight(v, default=2):
-    try:
-        vv = int(v)
-    except Exception:
-        vv = default
-    return vv if vv in (1,2,3) else default
-
-# ---- Page renderer ----
-def render_weekly_planner(user: str, planning_week_date: date):
+def render_weekly_planner(user: str, selected_date):
     st.header("📅 Weekly Planner")
 
-    pick_date = st.date_input("Week of", value=planning_week_date, key="planner_week_picker")
+    # Week picker
+    pick_date = st.date_input("Week of", value=selected_date, key="planner_week_picker")
     week_start, week_end = week_bounds_ist(pick_date)
+    if pick_date != selected_date:
+        st.session_state.planning_week_date = pick_date
+        st.rerun()
 
-    # --- Capacity controls ---
+    # Capacity form
     settings = get_user_settings(user)
-    colA, colB, colC = st.columns(3)
-    with colA:
-        wp = st.number_input("Weekday avg", 0, 12, value=int(settings["weekday_poms"]), key="cap_wp")
-    with colB:
-        we = st.number_input("Weekend avg", 0, 12, value=int(settings["weekend_poms"]), key="cap_we")
-    with colC:
-        wd_count, we_count = week_day_counts(week_start)
-        total_live = compute_weekly_capacity({"weekday_poms": wp, "weekend_poms": we}, weekdays=wd_count, weekend_days=we_count)
-        st.metric(f"Capacity {week_start} → {week_end}", f"{total_live}")
-        if (wp != settings["weekday_poms"]) or (we != settings["weekend_poms"]):
-            if st.button("💾 Save as Defaults", use_container_width=True, key="btn_save_defaults"):
-                from user_management import users_collection, get_user_settings as _gus
-                users_collection.update_one({"username": user}, {"$set": {"weekday_poms": int(wp), "weekend_poms": int(we)}})
-                _gus.clear()
-                st.success("Saved new defaults")
-                st.rerun()
+    plan = get_or_create_weekly_plan(user, week_start)
+    wd_count, we_count = week_day_counts(week_start)
+    with st.form("capacity_form"):
+        c1, c2, c3 = st.columns(3)
+        with c1: wp = st.number_input("Weekday avg", 0, 12, value=settings["weekday_poms"])
+        with c2: we = st.number_input("Weekend avg", 0, 12, value=settings["weekend_poms"])
+        with c3:
+            total = compute_weekly_capacity({"weekday_poms": wp, "weekend_poms": we}, weekdays=wd_count, weekend_days=we_count)
+            st.metric(f"Capacity {week_start} → {week_end}", f"{total}")
+        save_defaults = st.form_submit_button("💾 Save Defaults")
+    if 'save_defaults' in locals() and save_defaults:
+        from user_management import users_collection, get_user_settings as _gus
+        users_collection.update_one({"username": user}, {"$set": {"weekday_poms": int(wp), "weekend_poms": int(we)}})
+        _gus.clear()
+        st.success("Defaults saved.")
+        st.rerun()
 
     st.divider()
 
-    # --- Goal Catalog ---
-    st.subheader("📌 Goal Catalog")
-    goals_df_all = fetch_goals(user)
-    if goals_df_all.empty:
-        with st.expander("Add Goal"):
-            g_title = st.text_input("Title", placeholder="e.g., UGC NET Paper 1", key="new_goal_title")
-            g_type = st.selectbox("Type", ["Certification","Portfolio","Job Prep","Research","Startup","Learning","Other"], index=0, key="new_goal_type")
-            g_weight = st.select_slider("Priority", options=[1,2,3], value=2, help="High=3, Medium=2, Low=1", key="new_goal_weight")
-            if st.button("💾 Save Goal", key="btn_save_goal"):
-                if g_title.strip():
-                    upsert_goal(user, g_title.strip(), int(g_weight), g_type, "New")
-                    fetch_goals.clear()
-                    st.success("Saved goal")
-                    st.rerun()
-        st.info("Add 3–4 goals to plan the week.")
+    # Goals table (editable)
+    st.subheader("🎯 Goals & Priority Weights")
+    goals_df = fetch_goals(user, statuses=["New","In Progress","On Hold","Completed","Archived"])
+    if goals_df.empty:
+        with st.form("add_first_goal"):
+            t = st.text_input("Title", placeholder="e.g., UGC NET Paper 1")
+            typ = st.selectbox("Type", ["Certification","Portfolio","Job Prep","Research","Startup","Learning","Other"], index=0)
+            w = st.select_slider("Priority", options=[1,2,3], value=2, help="High=3, Medium=2, Low=1")
+            submit_new = st.form_submit_button("💾 Save Goal")
+        if submit_new and t.strip():
+            upsert_goal(user, t.strip(), int(w), typ, "New")
+            fetch_goals.clear()
+            st.success("Goal added.")
+            st.rerun()
+        st.info("Add goals to plan the week.")
         return
 
-    col_ongo, col_hold, col_done = st.columns(3)
-    with col_ongo:
-        st.markdown("**Ongoing** (New/In Progress)")
-        g = goals_df_all[goals_df_all["status"].isin(["New","In Progress"])][["title","priority_weight","goal_type"]]
-        st.dataframe(g.rename(columns={"priority_weight":"Priority","goal_type":"Type"}), use_container_width=True, hide_index=True, height=min(220, 38+len(g)*32))
-    with col_hold:
-        st.markdown("**On Hold**")
-        g = goals_df_all[goals_df_all["status"].isin(["On Hold"])][["title","priority_weight","goal_type"]]
-        st.dataframe(g.rename(columns={"priority_weight":"Priority","goal_type":"Type"}), use_container_width=True, hide_index=True, height=min(220, 38+len(g)*32))
-    with col_done:
-        st.markdown("**Completed (recent)**")
-        g = goals_df_all[goals_df_all["status"].isin(["Completed"])][["title","goal_type"]].head(10)
-        st.dataframe(g.rename(columns={"goal_type":"Type"}), use_container_width=True, hide_index=True, height=min(220, 38+len(g)*32))
-
-    st.divider()
-
-    # --- Priority Weights (Ongoing) ---
-    st.subheader("🎯 Priority Weights (Ongoing)")
-    goals_df = goals_df_all[goals_df_all["status"].isin(["New","In Progress"])].copy()
-    weights = {}
-    cols = st.columns(min(4, max(1, len(goals_df))))
-    for i, (_, row) in enumerate(goals_df.iterrows()):
-        with cols[i % len(cols)]:
-            st.write(f"**{row['title']}**")
-            default_w = sanitize_weight(row.get("priority_weight", 2))
-            w = st.select_slider("Priority", options=[1,2,3], value=default_w, key=f"w_{row['_id']}", help="High=3, Medium=2, Low=1")
-            weights[row["_id"]] = int(w)
-
-    if st.button("💾 Update Priorities", key="btn_update_weights"):
-        for gid, w in weights.items():
-            collection_goals.update_one({"_id": gid}, {"$set": {"priority_weight": int(w), "updated_at": datetime.utcnow()}})
-        fetch_goals.clear()
-        st.success("Priorities updated.")
-        st.rerun()
-
-    st.divider()
-
-    # --- Last Week Summary & Close-out ---
-    st.subheader("🧭 Last Week: Summary & Close-out")
-    prev_start = week_start - timedelta(days=7)
-    prev_end = prev_start + timedelta(days=6)
-    prev_plan = collection_plans.find_one({"_id": f"{user}|{prev_start.isoformat()}"}) or {}
-    prev_alloc = prev_plan.get("allocations", {}) or {}
-    titles = goal_title_map(user)
-
-    df_all_user = get_user_sessions(user)
-
-    if df_all_user.empty or not prev_alloc:
-        st.info("No previous plan or no data yet.")
-        prev_summary_df = pd.DataFrame(columns=["goal_id","Title","Planned","Actual","Delta"])
-    else:
-        mask_prev = (df_all_user["date"].dt.date >= prev_start) & (df_all_user["date"].dt.date <= prev_end)
-        dfw_prev = df_all_user[mask_prev & (df_all_user["pomodoro_type"]=="Work")].copy()
-        actual_prev = dfw_prev[dfw_prev["goal_id"].notna()].groupby("goal_id").size().to_dict()
-
-        rows = [{
-            "goal_id": gid,
-            "Title": titles.get(gid, "(missing)"),
-            "Planned": int(planned),
-            "Actual": int(actual_prev.get(gid, 0))
-        } for gid, planned in prev_alloc.items()]
-        prev_summary_df = pd.DataFrame(rows)
-        if not prev_summary_df.empty:
-            prev_summary_df["Delta"] = prev_summary_df["Actual"] - prev_summary_df["Planned"]
-
-    if not prev_summary_df.empty:
-        st.dataframe(
-            prev_summary_df[["Title","Planned","Actual","Delta"]].sort_values("Planned", ascending=False),
-            use_container_width=True, hide_index=True
+    editable = _goal_dataframe_for_editor(goals_df)
+    with st.form("goals_editor_form"):
+        edited = st.data_editor(
+            editable,
+            hide_index=True,
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "Title": st.column_config.TextColumn("Title", required=True, width="medium"),
+                "Type": st.column_config.SelectboxColumn("Type",
+                    options=["Certification","Portfolio","Job Prep","Research","Startup","Learning","Other"]),
+                "Weight": st.column_config.SelectboxColumn("Weight", options=[1,2,3]),
+                "Status": st.column_config.SelectboxColumn("Status",
+                    options=["New","In Progress","On Hold","Completed","Archived"]),
+            }
         )
-        st.caption(f"Week: {prev_start} → {prev_end}")
+        update_goals = st.form_submit_button("💾 Update Goals")
 
-        st.markdown("**Close-out Actions**")
-        for _, r in prev_summary_df.iterrows():
-            gid = r["goal_id"]
-            carry_default = max(0, int(r["Planned"]) - int(r["Actual"]))
-            col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
-            with col1:
-                st.write(f"**{r['Title']}**")
-            with col2:
-                status = st.selectbox("Status", ["Completed","Rollover","On Hold","Archived","In Progress"],
-                                      index=4, key=f"close_prev_{gid}")
-            with col3:
-                carry = st.number_input("Carry fwd poms", 0, 200, value=int(carry_default), key=f"carry_prev_{gid}")
-            with col4:
-                if st.button("✅ Apply", key=f"apply_prev_{gid}"):
-                    new_status = ("Completed" if status=="Completed" else
-                                  "On Hold" if status=="On Hold" else
-                                  "Archived" if status=="Archived" else
-                                  "In Progress")
-                    collection_goals.update_one({"_id": gid}, {"$set": {"status": new_status}})
-                    if status == "Rollover" and carry > 0:
-                        curr_plan = get_or_create_weekly_plan(user, week_start)
-                        curr_alloc = dict(curr_plan.get("allocations", {}))
-                        curr_goals = set(curr_plan.get("goals", []))
-                        curr_goals.add(gid)
-                        curr_alloc[gid] = int(curr_alloc.get(gid, 0)) + int(carry)
-                        save_plan_allocations(curr_plan["_id"], list(curr_goals), curr_alloc)
-                    st.success("Updated")
-                    st.rerun()
-
-    else:
-        st.info("No previous plan or nothing to close out.")
-
-    st.divider()
-
-    # --- Allocate CURRENT week ---
-    st.subheader("🧮 Allocate Weekly Pomodoros")
-    wd_count, we_count = week_day_counts(week_start)
-    total_poms_live = compute_weekly_capacity(get_user_settings(user), weekdays=wd_count, weekend_days=we_count)
-    weight_map = {row["_id"]: int(weights.get(row["_id"], sanitize_weight(row.get("priority_weight", 2))))
-                  for _, row in goals_df.iterrows()}
-    auto = proportional_allocation(int(total_poms_live), weight_map)
-
-    plan = get_or_create_weekly_plan(user, week_start)
-    plan_has_alloc = bool(plan.get("allocations"))
-    if plan_has_alloc:
-        st.caption("A plan already exists for this week. Adjust and save to update.")
-
-    edited = {}
-    cols2 = st.columns(min(4, max(1, len(goals_df))))
-    cap = int(total_poms_live)
-    for i, (_, row) in enumerate(goals_df.iterrows()):
-        with cols2[i % len(cols2)]:
-            plan_val = int(plan.get("allocations", {}).get(row['_id'], 0))
-            auto_val = int(auto.get(row['_id'], 0))
-            default_val = plan_val if plan_has_alloc else auto_val
-            default_val = max(0, min(default_val, cap))
-            val = st.number_input(f"{row['title']}", min_value=0, max_value=cap, value=default_val, step=1, key=f"alloc_{row['_id']}")
-            edited[row["_id"]] = int(val)
-
-    sum_edit = sum(edited.values())
-    if sum_edit != cap:
-        st.warning(f"Allocations sum to {sum_edit}, not {cap}.")
-        if st.button("🔁 Normalize to capacity", key="btn_normalize"):
-            edited = proportional_allocation(cap, {gid: max(1, v) for gid, v in edited.items()})
-            for gid, v in edited.items():
-                st.session_state[f"alloc_{gid}"] = v
+    if update_goals:
+        # Validate titles unique (per user)
+        titles = edited["Title"].fillna("").str.strip()
+        if titles.eq("").any():
+            st.error("Please fill titles for all rows.")
+        elif titles.duplicated().any():
+            st.error("Duplicate titles detected. Titles must be unique per user.")
+        else:
+            # Upsert all rows shown (existing + new)
+            for _, row in edited.iterrows():
+                upsert_goal(
+                    user,
+                    row["Title"].strip(),
+                    int(row["Weight"]),
+                    row["Type"],
+                    row["Status"],
+                    target_poms=0
+                )
+            fetch_goals.clear()
+            st.success("Goals updated.")
             st.rerun()
 
-    btn_label = "📌 Save Weekly Plan" if not plan_has_alloc else "📌 Update Weekly Plan"
-    if st.button(btn_label, type="primary", key="btn_save_plan"):
-        save_plan_allocations(plan["_id"], list(edited.keys()), edited)
+    st.divider()
+
+    # Allocation block (for active goals only)
+    st.subheader("🧮 Allocate Weekly Pomodoros")
+    active_goals = fetch_goals(user, statuses=["New","In Progress"])
+    if active_goals.empty:
+        st.info("No active goals to allocate. Mark some goals as New/In Progress.")
+        return
+
+    # Auto-allocate from weights
+    wd_count, we_count = week_day_counts(week_start)
+    total_poms = compute_weekly_capacity(get_user_settings(user), weekdays=wd_count, weekend_days=we_count)
+    weight_map = {row["_id"]: int(row.get("priority_weight", 2)) for _, row in active_goals.iterrows()}
+    auto = proportional_allocation(total_poms, weight_map)
+
+    # Actuals this week
+    df_all = get_user_sessions(user)
+    df_all["date_only"] = pd.to_datetime(df_all["date"]).dt.date if not df_all.empty else pd.Series([], dtype="object")
+    mask = (df_all["date_only"] >= week_start) & (df_all["date_only"] <= week_end) if not df_all.empty else pd.Series([], dtype=bool)
+    dfw = df_all[mask & (df_all["pomodoro_type"]=="Work")] if not df_all.empty else pd.DataFrame(columns=df_all.columns)
+    actual_by_goal = dfw[dfw["goal_id"].notna()].groupby("goal_id").size().to_dict()
+
+    # Build allocation editor table
+    titles = {row["_id"]: row["title"] for _, row in active_goals.iterrows()}
+    plan_alloc = plan.get("allocations", {}) or {}
+    rows = []
+    for gid in active_goals["_id"]:
+        planned = int(plan_alloc.get(gid, auto.get(gid, 0)))
+        actual = int(actual_by_goal.get(gid, 0))
+        rows.append({"Goal ID": gid, "Title": titles.get(gid, "(missing)"),
+                     "Planned": planned, "Actual": actual, "Δ": planned - actual})
+    alloc_df = pd.DataFrame(rows)
+
+    with st.form("alloc_editor_form"):
+        edited_alloc = st.data_editor(
+            alloc_df[["Title","Planned","Actual","Δ"]],
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Title": st.column_config.TextColumn("Title", disabled=True, width="large"),
+                "Planned": st.column_config.NumberColumn("Planned", min_value=0, step=1),
+                "Actual": st.column_config.NumberColumn("Actual", disabled=True),
+                "Δ": st.column_config.NumberColumn("Δ", disabled=True),
+            }
+        )
+        # capacity bar
+        sum_planned = int(edited_alloc["Planned"].sum()) if not edited_alloc.empty else 0
+        cap_text = f"Sum = {sum_planned} / Capacity {total_poms}"
+        if sum_planned == total_poms:
+            st.success(cap_text)
+        elif sum_planned < total_poms:
+            st.warning(cap_text + " (under)")
+        else:
+            st.error(cap_text + " (over)")
+
+        colN, colS = st.columns([1,1])
+        with colN:
+            normalize = st.form_submit_button("🔁 Normalize to Capacity")
+        with colS:
+            save_plan = st.form_submit_button("📌 Save Weekly Plan", type="primary")
+
+    if 'normalize' in locals() and normalize:
+        normalized = proportional_allocation(total_poms, {titles[g]: int(p) if int(p)>0 else 1
+                                                          for g, p in zip(active_goals["_id"], edited_alloc["Planned"].tolist())})
+        # update session widget values by title matching
+        for i, (gid, title) in enumerate(zip(active_goals["_id"], edited_alloc["Title"].tolist())):
+            new_val = normalized.get(title, edited_alloc.loc[i, "Planned"])
+            edited_alloc.loc[i, "Planned"] = int(new_val)
+        st.experimental_rerun()
+
+    if 'save_plan' in locals() and save_plan:
+        # Map back Title->gid safely
+        title_to_gid = {v: k for k, v in titles.items()}
+        new_alloc = {}
+        new_goals = []
+        for _, row in edited_alloc.iterrows():
+            gid = title_to_gid.get(row["Title"])
+            if gid:
+                new_goals.append(gid)
+                new_alloc[gid] = int(row["Planned"])
+        save_plan_allocations(plan["_id"], new_goals, new_alloc)
         st.success("Weekly plan saved!")
         st.rerun()
+
+    st.divider()
+
+    # Rollover wizard (optional)
+    with st.expander("↪️ Rollover unfinished from last week", expanded=False):
+        prev_start = week_start - timedelta(days=7)
+        prev_end = prev_start + timedelta(days=6)
+        prev_plan = get_or_create_weekly_plan(user, prev_start)
+        prev_alloc = prev_plan.get("allocations", {}) or {}
+        if not prev_alloc:
+            st.info("No previous plan found.")
+        else:
+            df_prev = get_user_sessions(user)
+            if df_prev.empty:
+                st.info("No data from last week.")
+            else:
+                df_prev["date_only"] = pd.to_datetime(df_prev["date"]).dt.date
+                mprev = (df_prev["date_only"] >= prev_start) & (df_prev["date_only"] <= prev_end)
+                dfw_prev = df_prev[mprev & (df_prev["pomodoro_type"]=="Work") & (df_prev["goal_id"].notna())]
+                actual_prev = dfw_prev.groupby("goal_id").size().to_dict()
+                rows = []
+                titles_prev = {gid: collection_goals.find_one({"_id": gid}, {"title":1}).get("title","(missing)")
+                               for gid in prev_alloc.keys()}
+                for gid, planned in prev_alloc.items():
+                    actual = int(actual_prev.get(gid, 0))
+                    carry = max(0, int(planned) - actual)
+                    rows.append({"Include": carry>0, "Title": titles_prev.get(gid,"(missing)"),
+                                 "Planned": int(planned), "Actual": actual, "Carry": carry, "Goal ID": gid})
+                df_roll = pd.DataFrame(rows)
+                df_edit = st.data_editor(
+                    df_roll[["Include","Title","Planned","Actual","Carry"]],
+                    num_rows="dynamic", hide_index=True, use_container_width=True,
+                    column_config={
+                        "Include": st.column_config.CheckboxColumn("Include"),
+                        "Title": st.column_config.TextColumn("Title", disabled=True),
+                        "Planned": st.column_config.NumberColumn("Planned", disabled=True),
+                        "Actual": st.column_config.NumberColumn("Actual", disabled=True),
+                        "Carry": st.column_config.NumberColumn("Carry", disabled=True),
+                    }
+                )
+                if st.button("Apply Rollover"):
+                    carry_rows = df_roll[df_edit["Include"] == True]
+                    curr_alloc = dict(plan.get("allocations", {}))
+                    curr_goals = set(plan.get("goals", []))
+                    for _, r in carry_rows.iterrows():
+                        gid = r["Goal ID"]
+                        if r["Carry"] > 0:
+                            curr_goals.add(gid)
+                            curr_alloc[gid] = int(curr_alloc.get(gid, 0)) + int(r["Carry"])
+                    save_plan_allocations(plan["_id"], list(curr_goals), curr_alloc)
+                    st.success("Rolled over unfinished poms into this week.")
+                    st.experimental_rerun()
+
+    st.divider()
+
+    # Last week snapshot table and status buckets
+    st.subheader("📋 Last Week Snapshot")
+    prev_start = week_start - timedelta(days=7); prev_end = prev_start + timedelta(days=6)
+    prev_plan = get_or_create_weekly_plan(user, prev_start)
+    prev_alloc = prev_plan.get("allocations", {}) or {}
+    if prev_alloc:
+        df_prev = get_user_sessions(user)
+        df_prev["date_only"] = pd.to_datetime(df_prev["date"]).dt.date if not df_prev.empty else pd.Series([], dtype="object")
+        mprev = (df_prev["date_only"] >= prev_start) & (df_prev["date_only"] <= prev_end) if not df_prev.empty else pd.Series([], dtype=bool)
+        dfw_prev = df_prev[mprev & (df_prev["pomodoro_type"]=="Work") & (df_prev["goal_id"].notna())] if not df_prev.empty else pd.DataFrame(columns=df_prev.columns)
+        actual_prev = dfw_prev.groupby("goal_id").size().to_dict()
+        rows = []
+        for gid, planned in prev_alloc.items():
+            title = collection_goals.find_one({"_id": gid}, {"title":1}).get("title","(missing)")
+            actual = int(actual_prev.get(gid, 0))
+            rows.append({"Title": title, "Planned": int(planned), "Actual": actual, "Δ": int(planned)-actual})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No plan existed for last week.")
+
+    st.subheader("📚 Goals by Status")
+    g_all = fetch_goals(user)
+    for label, statuses in [
+        ("🟢 Ongoing", ["New","In Progress"]),
+        ("🟡 On Hold", ["On Hold"]),
+        ("✅ Completed", ["Completed"]),
+        ("📦 Archived", ["Archived"]),
+    ]:
+        sub = g_all[g_all["status"].isin(statuses)][["title","goal_type","priority_weight","status"]]
+        if not sub.empty:
+            st.markdown(f"**{label}**")
+            st.dataframe(sub.rename(columns={"title":"Title","goal_type":"Type","priority_weight":"Weight","status":"Status"}),
+                         use_container_width=True, hide_index=True)
