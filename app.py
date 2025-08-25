@@ -130,25 +130,49 @@ DEFAULTS = {
     "custom_categories": ["Learning", "Projects", "Research", "Planning"]
 }
 
+# ---- Hardened index setup (never touch _id, drop strays) ----
+def _drop_stray_id_indexes():
+    """
+    Drop any non-default _id indexes that may have been created by older code.
+    MongoDB creates and manages the default _id index (_id_).
+    """
+    try:
+        for ix in col_user_days.list_indexes():
+            key = ix.get("key", {})
+            name = ix.get("name", "")
+            # default is {"_id": 1} named "_id_"
+            if key == {"_id": 1} and name != "_id_":
+                col_user_days.drop_index(name)
+    except Exception as e:
+        st.warning(f"Could not scan/drop stray _id index on user_days: {e}")
+    try:
+        for ix in col_weekly.list_indexes():
+            key = ix.get("key", {})
+            name = ix.get("name", "")
+            if key == {"_id": 1} and name != "_id_":
+                col_weekly.drop_index(name)
+    except Exception as e:
+        st.warning(f"Could not scan/drop stray _id index on weekly_plans: {e}")
+
 def ensure_indexes():
     try:
-        # --- user_days ---
-        # Query patterns you actually use
+        # Clean up any accidental _id indexes from old code
+        _drop_stray_id_indexes()
+
+        # --- user_days --- (NO _id indexing here)
         col_user_days.create_index([("user", 1), ("date", 1)], name="user_date")
         col_user_days.create_index([("sessions.gid", 1)], name="sessions_gid")
         col_user_days.create_index([("sessions.linked_gid", 1)], name="sessions_linked_gid")
         col_user_days.create_index([("sessions.unplanned", 1)], name="sessions_unplanned")
         col_user_days.create_index([("sessions.cat", 1)], name="sessions_cat")
 
-        # --- weekly_plans ---
+        # --- weekly_plans --- (NO _id indexing here)
         col_weekly.create_index([("user", 1), ("type", 1)], name="user_type")
         col_weekly.create_index([("user", 1), ("week_start", 1)], name="user_week")
 
         st.toast("Indexes ensured.")
     except Exception as e:
         st.warning(f"Index ensure notice: {e}")
-
-
 
 def list_users() -> List[str]:
     users_w = col_weekly.distinct("user") or []
@@ -1347,7 +1371,7 @@ def render_analytics_review(user: str):
             skip = max(0, expected_breaks - len(dfb))
             st.metric("Break Skip", pct_or_dash(skip, expected_breaks))
         with c8:
-            extend = max(0, len(dfb) - expected_breaks)
+            extend = max(0, len(dfb) - len(dfw))
             st.metric("Break Extend", pct_or_dash(extend, expected_breaks))
 
         st.divider()
@@ -1622,6 +1646,37 @@ def main_header_and_router():
     st.sidebar.markdown("### ⚙️ Admin")
     if st.sidebar.button("Ensure Indexes"):
         ensure_indexes()
+
+    # --- Debug: show current indexes ---
+    with st.sidebar.expander("🔎 Index Debug", expanded=False):
+        if st.button("Refresh index list", key="refresh_indexes_btn"):
+            st.rerun()
+        st.caption("user_days indexes")
+        try:
+            for ix in col_user_days.list_indexes():
+                st.code(str(ix))
+        except Exception as e:
+            st.write(f"(error listing user_days indexes: {e})")
+
+        st.caption("weekly_plans indexes")
+        try:
+            for ix in col_weekly.list_indexes():
+                st.code(str(ix))
+        except Exception as e:
+            st.write(f"(error listing weekly_plans indexes: {e})")
+
+    # Clear caches to avoid stale hot-reload state
+    if st.sidebar.button("🧹 Clear caches & reload"):
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+        try:
+            st.cache_resource.clear()
+        except Exception:
+            pass
+        st.experimental_rerun()
+
     data = export_sessions_csv(st.session_state.user)
     if data:
         st.sidebar.download_button("⬇️ Export Sessions (CSV)", data, file_name=f"{st.session_state.user}_sessions.csv", mime="text/csv")
