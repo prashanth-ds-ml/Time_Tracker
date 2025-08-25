@@ -16,7 +16,7 @@ st.set_page_config(
     page_title="Focus Timer • Weekly Priorities",
     layout="wide",
     initial_sidebar_state="collapsed",
-    menu_items={'About': "Focus Timer - Weekly Priorities & Pomodoro Management (v2 schema)"}
+    menu_items={'About': "Focus Timer - Weekly Priorities & Pomodoro Management"}
 )
 
 POMODORO_MIN = 25
@@ -42,13 +42,6 @@ db, col_user_days, col_weekly = init_db()
 # =========================
 # HELPERS
 # =========================
-DEFAULTS = {
-    "weekday_poms": 3,
-    "weekend_poms": 5,
-    "auto_break": True,
-    "custom_categories": ["Learning", "Projects", "Research", "Planning"]
-}
-
 def now_ist() -> datetime:
     return datetime.now(IST)
 
@@ -116,6 +109,7 @@ def goal_id(user: str, title: str) -> str:
     return hashlib.sha256(f"{user}|{title}".encode()).hexdigest()[:16]
 
 def sound_alert():
+    # Minimal HTML just to play a sound
     st.components.v1.html(f"""
         <audio id="done" autoplay>
             <source src="{SOUND_PATH}" type="audio/mpeg">
@@ -129,11 +123,20 @@ def sound_alert():
 # =========================
 # DATA ACCESS (v2)
 # =========================
+DEFAULTS = {
+    "weekday_poms": 3,
+    "weekend_poms": 5,
+    "auto_break": True,
+    "custom_categories": ["Learning", "Projects", "Research", "Planning"]
+}
+
 def ensure_indexes():
     try:
         col_user_days.create_index([("user", 1), ("date", 1)], name="user_date")
+        col_user_days.create_index([("_id", 1)], name="_id")
         col_weekly.create_index([("user", 1), ("type", 1)], name="user_type")
         col_weekly.create_index([("user", 1), ("week_start", 1)], name="user_week")
+        col_weekly.create_index([("_id", 1)], name="_id")
         st.toast("Indexes ensured.")
     except Exception as e:
         st.warning(f"Index notice: {e}")
@@ -148,6 +151,7 @@ def create_registry_if_missing(user: str):
     rid = f"{user}|registry"
     doc = col_weekly.find_one({"_id": rid})
     if doc:
+        # Patch legacy or missing keys
         patch = {}
         if "type" not in doc: patch["type"] = "registry"
         if "schema_version" not in doc: patch["schema_version"] = 2
@@ -157,11 +161,12 @@ def create_registry_if_missing(user: str):
             patch["updated_at"] = datetime.utcnow()
             col_weekly.update_one({"_id": rid}, {"$set": patch})
         return
+
     col_weekly.insert_one({
         "_id": rid,
+        "user": user,
         "type": "registry",
         "schema_version": 2,
-        "user": user,
         "user_defaults": DEFAULTS.copy(),
         "goals": {},
         "created_at": datetime.utcnow(),
@@ -196,6 +201,7 @@ def upsert_registry_goal(user: str, title: str, goal_type: str, priority_weight:
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
     }
+    # only set created_at on insert
     existing = col_weekly.find_one({"_id": rid, f"goals.{gid}": {"$exists": True}})
     if existing:
         gdoc.pop("created_at", None)
@@ -239,6 +245,7 @@ def get_plan(user: str, week_start: date, create_if_missing=True) -> Dict:
 def save_plan_allocations(user: str, week_start: date, allocations: Dict[str, int]):
     plan = get_plan(user, week_start, create_if_missing=True)
     pid = plan["_id"]
+    # keep allocations clean ints >= 0
     clean = {gid: max(0, int(v)) for gid, v in allocations.items()}
     reg = get_registry(user)
     embedded = []
@@ -293,6 +300,22 @@ def week_actuals_by_goal(user: str, week_start: date) -> Dict[str, int]:
                 counts[s["gid"]] = counts.get(s["gid"], 0) + 1
     return counts
 
+def week_counts(user: str, week_start: date) -> Dict[str, int]:
+    end = week_start + timedelta(days=6)
+    days = user_days_between(user, week_start, end)
+    work = 0; brk = 0; deep = 0; custom = 0
+    for d in days:
+        for s in d.get("sessions", []):
+            if s.get("t") == "W":
+                work += 1
+                if int(s.get("dur", 0)) >= 23:
+                    deep += 1
+                if not s.get("gid"):
+                    custom += 1
+            elif s.get("t") == "B":
+                brk += 1
+    return {"work": work, "break": brk, "deep": deep, "custom": custom}
+
 def flatten_user_days(user: str, start: Optional[date] = None, end: Optional[date] = None) -> pd.DataFrame:
     q: Dict = {"user": user}
     if start and end:
@@ -318,6 +341,7 @@ def flatten_user_days(user: str, start: Optional[date] = None, end: Optional[dat
     return df
 
 def update_user_day_after_append(doc: Dict):
+    # recompute totals, deep, by_category_minutes, start_time_mins, switches
     sessions = doc.get("sessions", [])
     work = sum(1 for s in sessions if s.get("t") == "W")
     work_min = sum(int(s.get("dur", 0)) for s in sessions if s.get("t") == "W")
@@ -333,6 +357,7 @@ def update_user_day_after_append(doc: Dict):
         m = time_to_minutes(s.get("time", "")) if s.get("time") else None
         if m is not None:
             starts.append(m)
+    # switches by key (gid or category)
     switches = 0
     prev = None
     for s in sessions:
@@ -360,12 +385,14 @@ def append_session(user: str, kind: str, dur_min: int, time_str: str,
             "_id": _id, "user": user, "date": today, "schema_version": 2,
             "sessions": [], "notes": [], "created_at": datetime.utcnow()
         }
+    # Append new block
     block = {"t": ("B" if kind == "B" else "W"), "dur": int(dur_min), "time": time_str}
     if block["t"] == "W":
         if gid: block["gid"] = gid
         if cat: block["cat"] = cat
         if task: block["task"] = task
     doc["sessions"].append(block)
+    # Recompute aggregates
     update_user_day_after_append(doc)
     col_user_days.update_one({"_id": _id}, {"$set": doc}, upsert=True)
 
@@ -409,7 +436,7 @@ init_session_state()
 # =========================
 def this_week_glance(user: str):
     today = now_ist().date()
-    wk_start, _ = week_bounds_ist(today)
+    wk_start, wk_end = week_bounds_ist(today)
     plan = get_plan(user, wk_start, create_if_missing=True)
     alloc = plan.get("allocations", {}) or {}
     if not alloc:
@@ -418,6 +445,7 @@ def this_week_glance(user: str):
     actual = week_actuals_by_goal(user, wk_start)
     reg = get_registry(user)
     titles = {gid: reg["goals"].get(gid, {}).get("title", "(missing)") for gid in alloc.keys()}
+
     cols = st.columns(2)
     i = 0
     for gid, planned in alloc.items():
@@ -464,7 +492,9 @@ def render_timer_widget(auto_break: bool) -> bool:
         st.rerun()
         return True
     else:
+        # Complete current block
         was_break = st.session_state.is_break
+        # Save
         now = now_ist()
         append_session(
             user=st.session_state.user,
@@ -475,14 +505,19 @@ def render_timer_widget(auto_break: bool) -> bool:
             cat=(st.session_state.active_goal_title if (not was_break and st.session_state.active_goal_id is None) else ""),
             gid=(st.session_state.active_goal_id if (not was_break) else None)
         )
+        # Play sound immediately
         sound_alert()
         st.balloons()
         st.success("🎉 Session complete!")
+
+        # Reset
         st.session_state.start_time = None
         st.session_state.is_break = False
         st.session_state.task = ""
         st.session_state.active_goal_id = None
         st.session_state.active_goal_title = ""
+
+        # Auto break after WORK (sound already played)
         if (not was_break) and auto_break:
             st.toast("☕ Auto-starting a 5-minute break")
             st.session_state.start_time = time.time()
@@ -511,10 +546,12 @@ def render_focus_timer(user: str):
                 custom_categories=reg["user_defaults"].get("custom_categories", DEFAULTS["custom_categories"])
             )
 
+    # Active timer?
     if render_timer_widget(auto_break=bool(get_registry(user)["user_defaults"].get("auto_break", True))):
         return
 
-    # Daily target
+    # Daily target widget
+    # (Stored on user_days as "daily_target")
     today_id = f"{user}|{now_ist().date().isoformat()}"
     day_doc = col_user_days.find_one({"_id": today_id})
     st.markdown("## 🎯 Daily Target")
@@ -543,7 +580,11 @@ def render_focus_timer(user: str):
                 st.success("Saved!")
                 st.rerun()
     with colB:
-        ws = int((day_doc or {}).get("totals", {}).get("work_sessions", 0))
+        # progress bar for today
+        if day_doc and day_doc.get("totals", {}).get("work_sessions"):
+            ws = int(day_doc["totals"]["work_sessions"])
+        else:
+            ws = 0
         tgt = (day_doc or {}).get("daily_target")
         if tgt:
             pct = min(100.0, (ws / max(1, int(tgt))) * 100)
@@ -552,11 +593,14 @@ def render_focus_timer(user: str):
             st.info("Set a target to unlock tracking.")
 
     st.divider()
+
+    # This week glance + start-time spark
     st.subheader("📌 This Week at a Glance")
     this_week_glance(user)
     start_time_spark(user)
     st.divider()
 
+    # Mode
     mode = st.radio("Mode", ["Weekly Goal", "Custom (Unplanned)"], horizontal=True)
 
     if mode == "Weekly Goal":
@@ -596,6 +640,7 @@ def render_focus_timer(user: str):
                 st.session_state.task = ""
                 st.rerun()
     else:
+        # Custom
         reg = get_registry(user)
         current_cats = list(reg["user_defaults"].get("custom_categories", DEFAULTS["custom_categories"]))
         cat_options = current_cats + ["+ Add New"]
@@ -618,9 +663,11 @@ def render_focus_timer(user: str):
         else:
             category_label = selected
         task = st.text_input("Task (micro-task)", placeholder="e.g., Draft outreach emails")
+
         st.session_state.active_goal_id = None
         st.session_state.active_goal_title = category_label
         st.session_state.task = task
+
         colw, colb = st.columns(2)
         with colw:
             disabled = not (category_label and task.strip())
@@ -637,14 +684,17 @@ def render_focus_timer(user: str):
                 st.session_state.task = ""
                 st.rerun()
 
-    # Today summary
+    # Today's compact summary
     td = col_user_days.find_one({"_id": f"{user}|{now_ist().date().isoformat()}"}) or {}
     totals = td.get("totals", {})
     st.divider(); st.subheader("📊 Today")
     c1, c2, c3, c4 = st.columns(4)
-    with c1: st.metric("Work Sessions", int(totals.get("work_sessions", 0)))
-    with c2: st.metric("Focus Minutes", int(totals.get("work_minutes", 0)))
-    with c3: st.metric("Breaks", int(totals.get("break_sessions", 0)))
+    with c1:
+        st.metric("Work Sessions", int(totals.get("work_sessions", 0)))
+    with c2:
+        st.metric("Focus Minutes", int(totals.get("work_minutes", 0)))
+    with c3:
+        st.metric("Breaks", int(totals.get("break_sessions", 0)))
     with c4:
         tgt = td.get("daily_target")
         if tgt:
@@ -663,7 +713,7 @@ def render_weekly_planner(user: str):
         st.session_state.planning_week_date = pick_date
         st.rerun()
 
-    # Capacity defaults
+    # Defaults / capacity
     reg = get_registry(user)
     wp = int(reg["user_defaults"].get("weekday_poms", DEFAULTS["weekday_poms"]))
     we = int(reg["user_defaults"].get("weekend_poms", DEFAULTS["weekend_poms"]))
@@ -688,13 +738,13 @@ def render_weekly_planner(user: str):
 
     st.divider()
 
-    # Goals + priority editing
+    # Goals & Priority
     st.subheader("🎯 Goals & Priority")
     with st.expander("➕ Add or Update Goal"):
         g_title = st.text_input("Title", placeholder="e.g., UGC NET Paper 1")
         g_type = st.selectbox("Type", ["Certification","Portfolio","Job Prep","Research","Startup","Learning","Other"], index=0)
         raw_weight = st.number_input("Priority weight (1=Low, 3=High)", 1, 5, value=3)
-        g_weight = clamp_priority(raw_weight)
+        g_weight = clamp_priority(raw_weight)  # robust: clamps 1..3 even if legacy had 5
         g_status = st.selectbox("Status", ["New","In Progress","Completed","On Hold","Archived"], index=1)
         if st.button("💾 Save Goal"):
             if g_title.strip():
@@ -710,14 +760,11 @@ def render_weekly_planner(user: str):
         st.info("Add 3–4 goals to plan the week.")
         return
 
-    include_hold = st.checkbox("Include 'On Hold' goals in planning", value=False)
-    allowed_status = ["New","In Progress"] + (["On Hold"] if include_hold else [])
-    goals_for_planning = {gid:g for gid,g in goals_dict.items() if g.get("status","In Progress") in allowed_status}
-
-    cols = st.columns(min(4, max(1, len(goals_for_planning))))
+    # Editable priority weights (robust against legacy 4/5)
+    cols = st.columns(min(4, max(1, len(goals_dict))))
     i = 0
     new_weights = {}
-    for gid, g in goals_for_planning.items():
+    for gid, g in goals_dict.items():
         with cols[i % len(cols)]:
             st.write(f"**{g.get('title','(untitled)')}**")
             w_val = clamp_priority(g.get("priority_weight", 2))
@@ -732,79 +779,14 @@ def render_weekly_planner(user: str):
 
     st.divider()
 
-    # -------- LEFT: Last Week Recap & Actions  --------
-    st.subheader("🕑 Last Week Recap & Actions")
-    prev_start = wk_start - timedelta(days=7)
-    prev_plan = get_plan(user, prev_start, create_if_missing=False)
-    reg = get_registry(user)
-    titles_all = {gid: reg["goals"].get(gid, {}).get("title", "(missing)") for gid in (prev_plan.get("allocations", {}) if prev_plan else {})}
-
-    colL, colR = st.columns(2)
-
-    with colL:
-        if not prev_plan or not prev_plan.get("allocations"):
-            st.info("No plan for last week.")
-        else:
-            actual_prev = week_actuals_by_goal(user, prev_start)
-            rows = []
-            for gid, planned in prev_plan["allocations"].items():
-                rows.append({
-                    "Goal": titles_all.get(gid, "(missing)"),
-                    "Planned": int(planned),
-                    "Actual": int(actual_prev.get(gid, 0)),
-                    "Carry": max(0, int(planned) - int(actual_prev.get(gid, 0)))
-                })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-    with colR:
-        if prev_plan and prev_plan.get("allocations"):
-            st.markdown("**Per-goal actions**")
-            actions = {}
-            for gid in prev_plan["allocations"].keys():
-                g = reg["goals"].get(gid, {})
-                label = g.get("title","(missing)")
-                actions[gid] = st.selectbox(
-                    label,
-                    ["Continue", "Rollover carry", "Hold", "Complete"],
-                    index=0,
-                    key=f"act_{gid}_{prev_start}"
-                )
-            if st.button("✅ Apply Actions to Current Week"):
-                # Merge carryovers, set statuses
-                merged = dict(get_plan(user, wk_start, create_if_missing=True).get("allocations", {}))
-                actual_prev = week_actuals_by_goal(user, prev_start)
-                for gid, action in actions.items():
-                    if action == "Rollover carry":
-                        carry = max(0, int(prev_plan["allocations"].get(gid, 0)) - int(actual_prev.get(gid, 0)))
-                        if carry > 0:
-                            merged[gid] = int(merged.get(gid, 0)) + carry
-                    elif action == "Hold":
-                        set_goal_fields(user, gid, {"status": "On Hold"})
-                        if gid in merged: merged.pop(gid, None)
-                    elif action == "Complete":
-                        set_goal_fields(user, gid, {"status": "Completed"})
-                        if gid in merged: merged.pop(gid, None)
-                    # Continue -> no change
-                save_plan_allocations(user, wk_start, merged)
-                st.success("Applied!")
-                st.rerun()
-
-            st.caption("Tip: You can also copy entire last week's plan to this week (replaces current).")
-            if st.button(f"📋 Copy last week's plan ({prev_start} → {prev_start+timedelta(days=6)})"):
-                save_plan_allocations(user, wk_start, dict(prev_plan["allocations"]))
-                st.success("Copied last week's plan.")
-                st.rerun()
-
-    st.divider()
-
-    # -------- RIGHT: This Week Plan (edit) --------
-    st.subheader("🧮 This Week Plan")
+    # Allocation
+    st.subheader("🧮 Allocate Weekly Pomodoros")
     wd, wec = week_day_counts(wk_start)
     cap_total = int(get_registry(user)["user_defaults"].get("weekday_poms", DEFAULTS["weekday_poms"])) * wd + \
                 int(get_registry(user)["user_defaults"].get("weekend_poms", DEFAULTS["weekend_poms"])) * wec
 
     weight_map = {gid: int(new_weights.get(gid, clamp_priority(g.get("priority_weight", 2))))
-                  for gid, g in goals_for_planning.items()}
+                  for gid, g in goals_dict.items()}
     auto_alloc = proportional_allocation(cap_total, weight_map)
 
     plan = get_plan(user, wk_start, create_if_missing=True)
@@ -815,7 +797,7 @@ def render_weekly_planner(user: str):
     i = 0
     for gid, w in weight_map.items():
         with cols2[i % len(cols2)]:
-            title = goals_for_planning.get(gid, {}).get("title", "(untitled)")
+            title = goals_dict.get(gid, {}).get("title", "(untitled)")
             default_val = int(current_alloc.get(gid, auto_alloc.get(gid, 0)))
             val = st.number_input(title, min_value=0, max_value=cap_total, value=default_val, step=1, key=f"a_{gid}")
             edited[gid] = int(val)
@@ -829,10 +811,70 @@ def render_weekly_planner(user: str):
                 st.session_state[f"a_{gid}"] = v
             st.rerun()
 
-    if st.button(("📌 Save This Week Plan" if not current_alloc else "📌 Update This Week Plan"), type="primary"):
+    if st.button(("📌 Save Weekly Plan" if not current_alloc else "📌 Update Weekly Plan"), type="primary"):
         save_plan_allocations(user, wk_start, edited)
         st.success("Weekly plan saved!")
         st.rerun()
+
+    # Rollover
+    with st.expander("↪️ Rollover unfinished from last week", expanded=False):
+        prev_start = wk_start - timedelta(days=7)
+        prev_plan = get_plan(user, prev_start, create_if_missing=False)
+        if st.button(f"Compute & Rollover from {prev_start} → {prev_start+timedelta(days=6)}"):
+            if not prev_plan or not prev_plan.get("allocations"):
+                st.warning("No previous plan found.")
+            else:
+                actual_prev = week_actuals_by_goal(user, prev_start)
+                carry = {gid: max(0, int(planned) - int(actual_prev.get(gid, 0)))
+                         for gid, planned in prev_plan["allocations"].items()}
+                carry = {gid: v for gid, v in carry.items() if v > 0}
+                if not carry:
+                    st.info("No unfinished items to rollover.")
+                else:
+                    merged = dict(current_alloc)
+                    for gid, add in carry.items():
+                        merged[gid] = int(merged.get(gid, 0)) + int(add)
+                    save_plan_allocations(user, wk_start, merged)
+                    st.success("Rolled over unfinished poms into this week.")
+                    st.rerun()
+
+    st.divider()
+
+    # Last Week Recap + Close-out
+    st.subheader("📜 Last Week Recap")
+    prev_start = wk_start - timedelta(days=7)
+    prev_plan = get_plan(user, prev_start, create_if_missing=False)
+    if not prev_plan or not prev_plan.get("allocations"):
+        st.info("No plan for last week.")
+    else:
+        actual_prev = week_actuals_by_goal(user, prev_start)
+        rows = []
+        titles = {gid: goals_dict.get(gid, {}).get("title", "(missing)") for gid in prev_plan["allocations"].keys()}
+        for gid, planned in prev_plan["allocations"].items():
+            rows.append({
+                "Goal": titles.get(gid, "(missing)"),
+                "Planned": int(planned),
+                "Actual": int(actual_prev.get(gid, 0)),
+                "Carry": max(0, int(planned) - int(actual_prev.get(gid, 0)))
+            })
+        df_rec = pd.DataFrame(rows)
+        st.dataframe(df_rec, use_container_width=True, hide_index=True)
+
+        st.subheader("✅ Close-out (Update Goal Status)")
+        for gid in prev_plan["allocations"].keys():
+            g = goals_dict.get(gid, {})
+            col1, col2 = st.columns([3, 2])
+            with col1:
+                st.write(f"**{g.get('title','(missing)')}**")
+            with col2:
+                new_status = st.selectbox(
+                    "Status", ["Completed", "In Progress", "On Hold", "Archived"],
+                    index=["New","In Progress","Completed","On Hold","Archived"].index(g.get("status","In Progress")) if g.get("status") in ["New","In Progress","Completed","On Hold","Archived"] else 1,
+                    key=f"s_{gid}_{prev_start}"
+                )
+            if st.button("Apply", key=f"apply_{gid}_{prev_start}"):
+                set_goal_fields(user, gid, {"status": new_status})
+                st.success("Updated")
 
 def render_analytics_review(user: str):
     st.header("📊 Analytics & Review")
@@ -842,10 +884,12 @@ def render_analytics_review(user: str):
     except Exception:
         mode = st.radio("Mode", ["Week Review", "Trends"], horizontal=True, index=0)
 
+    # Build a flat df for convenience
     df_all = flatten_user_days(user)
     if df_all.empty:
         st.info("No sessions yet. Start a Pomodoro to populate analytics.")
         return
+
     df_all["date_only"] = df_all["date_dt"].dt.date
 
     if mode == "Week Review":
@@ -865,17 +909,24 @@ def render_analytics_review(user: str):
         work_goal = dfw[pd.notna(dfw["gid"])].copy()
         work_custom = dfw[pd.isna(dfw["gid"])].copy()
         deep = int((dfw["dur"] >= 23).sum())
+
         goal_counts = work_goal.groupby("gid").size().values.tolist() if not work_goal.empty else []
 
         c1, c2, c3, c4 = st.columns(4)
-        with c1: st.metric("Plan Adherence", pct_or_dash(len(work_goal), total_planned))
-        with c2: st.metric("Capacity Utilization", pct_or_dash(len(dfw), total_planned))
-        with c3: st.metric("Deep-work %", pct_or_dash(deep, len(dfw)))
-        with c4: st.metric("Balance (Entropy)", f"{entropy_norm_from_counts(goal_counts):.2f}")
+        with c1:
+            st.metric("Plan Adherence", pct_or_dash(len(work_goal), total_planned))
+        with c2:
+            st.metric("Capacity Utilization", pct_or_dash(len(dfw), total_planned))
+        with c3:
+            st.metric("Deep-work %", pct_or_dash(deep, len(dfw)))
+        with c4:
+            st.metric("Balance (Entropy)", f"{entropy_norm_from_counts(goal_counts):.2f}")
 
         c5, c6, c7, c8 = st.columns(4)
-        with c5: st.metric("Gini (Goals)", f"{gini_from_counts(goal_counts):.2f}")
-        with c6: st.metric("Custom Share", pct_or_dash(len(work_custom), len(dfw)))
+        with c5:
+            st.metric("Gini (Goals)", f"{gini_from_counts(goal_counts):.2f}")
+        with c6:
+            st.metric("Custom Share", pct_or_dash(len(work_custom), len(dfw)))
         with c7:
             expected_breaks = len(dfw)
             skip = max(0, expected_breaks - len(dfb))
@@ -892,9 +943,12 @@ def render_analytics_review(user: str):
             actual_by_gid = week_actuals_by_goal(user, wk_start)
             rows = []
             for gid, p in planned_alloc.items():
-                rows.append({"Goal": titles.get(gid, "(missing)"), "Planned": int(p), "Actual": int(actual_by_gid.get(gid, 0))})
-            df_pa = pd.DataFrame(rows).set_index("Goal")
-            st.bar_chart(df_pa, height=260)
+                rows.append({
+                    "Goal": titles.get(gid, "(missing)"),
+                    "Planned": int(p),
+                    "Actual": int(actual_by_gid.get(gid, 0))
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         else:
             st.info("No planned allocations this week.")
 
@@ -910,37 +964,10 @@ def render_analytics_review(user: str):
                 expected_to_d = int(round(total_planned * ((i + 1) / len(days))))
                 actual_cum.append(actual_to_d)
                 exp_cum.append(expected_to_d)
-            rr = pd.DataFrame({"Expected": exp_cum, "Actual": actual_cum}, index=[ts.strftime("%a %d") for ts in days])
+            rr = pd.DataFrame({"day": [ts.strftime("%a %d") for ts in days],
+                               "Expected": exp_cum, "Actual": actual_cum}).set_index("day")
             st.subheader("Run-Rate vs Expected (Goals only)")
             st.line_chart(rr, height=260)
-
-        # Daily Work vs Break (this week)
-        st.subheader("Daily Work vs Break")
-        if not (dfw.empty and dfb.empty):
-            days = pd.date_range(start=pd.to_datetime(wk_start), end=pd.to_datetime(wk_end))
-            work_counts = []
-            break_counts = []
-            for ts in days:
-                d = ts.date()
-                work_counts.append(int((dfw["date_only"] == d).sum()))
-                break_counts.append(int((dfb["date_only"] == d).sum()))
-            wb = pd.DataFrame({"Work": work_counts, "Break": break_counts}, index=[ts.strftime("%a") for ts in days])
-            st.line_chart(wb, height=220)
-        else:
-            st.info("No sessions this week.")
-
-        # Category Minutes (this week)
-        st.subheader("Category Minutes (This Week)")
-        days_docs = user_days_between(user, wk_start, wk_end)
-        by_cat: Dict[str, int] = {}
-        for d in days_docs:
-            for cat, mins in (d.get("by_category_minutes") or {}).items():
-                by_cat[cat or "Uncategorized"] = by_cat.get(cat or "Uncategorized", 0) + int(mins)
-        if by_cat:
-            cat_df = pd.DataFrame.from_dict(by_cat, orient="index", columns=["Minutes"])
-            st.bar_chart(cat_df, height=220)
-        else:
-            st.info("No category data this week.")
 
     else:
         # Trends
@@ -968,54 +995,38 @@ def render_analytics_review(user: str):
         ddf = pd.DataFrame(daily).set_index("Date")
         st.bar_chart(ddf, height=240)
 
-        # Weekly minutes (last 8 weeks)
-        st.subheader("Weekly Focus Minutes (Last 8 Weeks)")
-        if not dfw.empty:
-            dfw["week_start"] = dfw["date_dt"].dt.to_period("W-MON").apply(lambda p: p.start_time.date())
-            wmins = dfw.groupby("week_start")["dur"].sum().reset_index()
-            wmins = wmins.sort_values("week_start").tail(8)
-            wmins_df = wmins.set_index(wmins["week_start"].astype(str))[["dur"]]
-            wmins_df.columns = ["Minutes"]
-            st.line_chart(wmins_df, height=220)
-        else:
-            st.info("No weekly data yet.")
-
-        # Deep-work rate (30d)
-        st.subheader("Deep-Work Rate (Last 30 Days)")
-        if not dfw.empty:
-            d30 = dfw[dfw["date_only"] >= (today - timedelta(days=30))].copy()
-            if not d30.empty:
-                daily_tot = d30.groupby("date_only").size()
-                daily_deep = d30[d30["dur"] >= 23].groupby("date_only").size()
-                idx = sorted(set(daily_tot.index) | set(daily_deep.index))
-                rate = []
-                for d in idx:
-                    tot = int(daily_tot.get(d, 0))
-                    dp = int(daily_deep.get(d, 0))
-                    rate.append({"Date": d.strftime("%m/%d"), "Deep %": safe_div(dp, tot) * 100 if tot > 0 else 0})
-                r_df = pd.DataFrame(rate).set_index("Date")
-                st.line_chart(r_df, height=220)
+        # Insights
+        st.markdown("#### 🔍 Insights (Last 30 days)")
+        df30 = dfw[dfw["date_only"] >= (today - timedelta(days=30))].copy()
+        if not df30.empty:
+            by_day = df30.groupby("date_only")["dur"].sum().sort_values(ascending=False)
+            best_day = by_day.index[0] if len(by_day) else None
+            best_day_min = int(by_day.iloc[0]) if len(by_day) else 0
+            starts = [time_to_minutes(t) for t in df30["time"].tolist() if isinstance(t, str)]
+            starts = [s for s in starts if s is not None]
+            if starts:
+                top_hour = pd.Series([s // 60 for s in starts]).mode().iloc[0]
+                ampm = "AM" if top_hour < 12 else "PM"
+                hour_disp = f"{(top_hour if 1 <= top_hour <= 12 else (12 if top_hour%12==0 else top_hour%12))}{ampm}"
             else:
-                st.info("No data in last 30 days.")
-        else:
-            st.info("No data yet.")
-
-        # Top goals (30d)
-        st.subheader("Top Goals (by sessions, 30d)")
-        if not dfw.empty:
-            d30 = dfw[(dfw["date_only"] >= (today - timedelta(days=30))) & pd.notna(dfw["gid"])].copy()
-            if not d30.empty:
-                top = d30.groupby("gid").size().sort_values(ascending=False).head(10)
-                reg = get_registry(user)
-                labels = [reg["goals"].get(gid, {}).get("title", gid[:6]) for gid in top.index]
-                g_df = pd.DataFrame({"Sessions": top.values}, index=labels)
-                st.bar_chart(g_df, height=240)
+                hour_disp = "—"
+            by_cat = df30.groupby("cat")["dur"].sum().sort_values(ascending=False)
+            if len(by_cat) > 0:
+                top_cat = by_cat.index[0] if isinstance(by_cat.index[0], str) and by_cat.index[0] else "Uncategorized"
+                top_share = safe_div(by_cat.iloc[0], by_cat.sum()) * 100
             else:
-                st.info("No goal-linked sessions in last 30 days.")
-        else:
-            st.info("No sessions yet.")
+                top_cat, top_share = "—", 0
+            # Break hygiene
+            df30b = df_all[(df_all["t"] == "B") & (df_all["date_only"] >= (today - timedelta(days=30)))]
+            skip_rate = pct_or_dash(max(0, len(df30) - len(df30b)), len(df30))
+            extend_rate = pct_or_dash(max(0, len(df30b) - len(df30)), len(df30))
 
-        # Category mix + tasks
+            cI1, cI2, cI3, cI4 = st.columns(4)
+            with cI1: st.metric("Best day (mins)", f"{best_day_min}", f"{best_day.strftime('%a %d %b') if best_day else '—'}")
+            with cI2: st.metric("Focus window", hour_disp)
+            with cI3: st.metric("Top category share", f"{top_share:.0f}%")
+            with cI4: st.metric("Break skip / extend", f"{skip_rate} / {extend_rate}")
+
         st.divider()
         st.subheader("🎯 Category Mix")
         opt = st.selectbox("Time Period", ["Last 7 days", "Last 30 days", "All time"], index=1)
@@ -1027,14 +1038,12 @@ def render_analytics_review(user: str):
             fw = dfw[dfw["date_only"] >= cutoff]
         else:
             fw = dfw
-
         if fw.empty:
             st.info("No data for selected period.")
             return
-
         cat = fw.groupby("cat")["dur"].sum().sort_values(ascending=False).reset_index().rename(columns={"dur":"Minutes"})
         cat = cat.set_index("cat")
-        st.bar_chart(cat, height=220)
+        st.bar_chart(cat, height=260)
 
         st.subheader("🎯 Task Performance")
         tstats = fw.groupby(["cat","task"]).agg(total_minutes=("dur","sum"), sessions=("dur","count")).reset_index()
@@ -1042,8 +1051,11 @@ def render_analytics_review(user: str):
             st.info("No tasks logged.")
         else:
             top_tasks = tstats.sort_values("total_minutes", ascending=False).head(12)
-            view = top_tasks.rename(columns={"cat":"Category","task":"Task","total_minutes":"Minutes","sessions":"Sessions"})
+            # Table with insights
+            view = top_tasks.copy()
+            view = view.rename(columns={"cat":"Category","task":"Task","total_minutes":"Minutes","sessions":"Sessions"})
             st.dataframe(view, use_container_width=True, hide_index=True)
+            # Quick insights
             total_time = tstats["total_minutes"].sum()
             top = tstats.sort_values("total_minutes", ascending=False).iloc[0]
             share = safe_div(top["total_minutes"], total_time) * 100
@@ -1073,11 +1085,12 @@ def render_journal(user: str):
             if st.form_submit_button("💾 Save Reflection"):
                 col_user_days.update_one(
                     {"_id": day_id},
-                    {"$set": {"user": user, "date": today_iso, "schema_version": 2,
-                              "reflection": {"aligned": aligned, "focus_rating": int(rating),
-                                             "blockers": blockers.strip(), "notes": notes.strip()},
-                              "updated_at": datetime.utcnow()},
-                     "$setOnInsert": {"created_at": datetime.utcnow()}},
+                    {"$set": {
+                        "user": user, "date": today_iso, "schema_version": 2,
+                        "reflection": {"aligned": aligned, "focus_rating": int(rating),
+                                       "blockers": blockers.strip(), "notes": notes.strip()},
+                        "updated_at": datetime.utcnow()
+                    }, "$setOnInsert": {"created_at": datetime.utcnow()}},
                     upsert=True
                 )
                 st.success("Saved ✨")
@@ -1120,14 +1133,18 @@ def render_journal(user: str):
 # HEADER + ROUTER
 # =========================
 def main_header_and_router():
+    # Initial users
     users = list_users()
     if not users:
+        # Bootstrap with a default user
         create_registry_if_missing("prashanth")
         users = list_users()
 
+    # Ensure session has a user
     if st.session_state.user is None or st.session_state.user not in users:
         st.session_state.user = users[0]
 
+    # Sidebar Admin
     st.sidebar.markdown("### ⚙️ Admin")
     if st.sidebar.button("Ensure Indexes"):
         ensure_indexes()
@@ -1137,6 +1154,7 @@ def main_header_and_router():
     else:
         st.sidebar.info("No sessions to export yet.")
 
+    # Top controls
     c1, c2, c3 = st.columns([2,3,2])
     with c1:
         try:
