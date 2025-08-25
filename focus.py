@@ -218,12 +218,18 @@ def render_focus_timer(user: str):
     settings = get_user_settings(user)
     colset1, _ = st.columns([1, 3])
     with colset1:
-        auto_break_ui = st.toggle("Auto-start break", value=settings.get("auto_break", True), help="Start a 5m break automatically after each 25m work session")
+        auto_break_ui = st.toggle(
+            "Auto-start break",
+            value=settings.get("auto_break", True),
+            help="Start a 5m break automatically after each 25m work session"
+        )
+        # FIX: removed stray ')' and clear cache on change
         if auto_break_ui != settings.get("auto_break", True):
             from user_management import users_collection, get_user_settings as _gus
             users_collection.update_one({"username": user}, {"$set": {"auto_break": bool(auto_break_ui)}})
             _gus.clear()
 
+    # Active timer?
     if render_timer_widget(user=user, auto_break=get_user_settings(user).get("auto_break", True)):
         return
 
@@ -234,12 +240,17 @@ def render_focus_timer(user: str):
     render_daily_target_planner(user, df_all, today_progress)
     st.divider()
 
-    df_work_all = df_all[df_all["pomodoro_type"]=="Work"].copy()
+    # SAFE: if df_all is empty, create an empty-but-shaped df_work_all
+    if df_all.empty:
+        df_work_all = pd.DataFrame(columns=["date", "time", "pomodoro_type", "goal_id", "duration"])
+    else:
+        df_work_all = df_all[df_all["pomodoro_type"] == "Work"].copy()
 
     st.subheader("📌 This Week at a Glance")
     this_week_glance_native(user, plan, df_work_all)
     start_time_sparkline_native(df_work_all)
     st.divider()
+    ...
 
     # Mode toggle
     mode = st.radio("Mode", ["Weekly Goal", "Custom (Unplanned)"], horizontal=True, key="focus_mode")

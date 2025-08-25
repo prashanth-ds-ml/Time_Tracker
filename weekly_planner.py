@@ -158,18 +158,30 @@ def render_weekly_planner(user: str, planning_week_date: date):
     titles = goal_title_map(user)
 
     df_all_user = get_user_sessions(user)
-    mask_prev = (df_all_user["date"].dt.date >= prev_start) & (df_all_user["date"].dt.date <= prev_end)
-    dfw_prev = df_all_user[mask_prev & (df_all_user["pomodoro_type"]=="Work")].copy()
-    actual_prev = dfw_prev[dfw_prev["goal_id"].notna()].groupby("goal_id").size().to_dict()
 
-    rows = [{"goal_id": gid, "Title": titles.get(gid, "(missing)"), "Planned": int(planned), "Actual": int(actual_prev.get(gid, 0))}
-            for gid, planned in prev_alloc.items()]
-    prev_summary_df = pd.DataFrame(rows)
+    if df_all_user.empty or not prev_alloc:
+        st.info("No previous plan or no data yet.")
+        prev_summary_df = pd.DataFrame(columns=["goal_id","Title","Planned","Actual","Delta"])
+    else:
+        mask_prev = (df_all_user["date"].dt.date >= prev_start) & (df_all_user["date"].dt.date <= prev_end)
+        dfw_prev = df_all_user[mask_prev & (df_all_user["pomodoro_type"]=="Work")].copy()
+        actual_prev = dfw_prev[dfw_prev["goal_id"].notna()].groupby("goal_id").size().to_dict()
+
+        rows = [{
+            "goal_id": gid,
+            "Title": titles.get(gid, "(missing)"),
+            "Planned": int(planned),
+            "Actual": int(actual_prev.get(gid, 0))
+        } for gid, planned in prev_alloc.items()]
+        prev_summary_df = pd.DataFrame(rows)
+        if not prev_summary_df.empty:
+            prev_summary_df["Delta"] = prev_summary_df["Actual"] - prev_summary_df["Planned"]
 
     if not prev_summary_df.empty:
-        prev_summary_df["Delta"] = prev_summary_df["Actual"] - prev_summary_df["Planned"]
-        st.dataframe(prev_summary_df[["Title","Planned","Actual","Delta"]].sort_values("Planned", ascending=False),
-                     use_container_width=True, hide_index=True)
+        st.dataframe(
+            prev_summary_df[["Title","Planned","Actual","Delta"]].sort_values("Planned", ascending=False),
+            use_container_width=True, hide_index=True
+        )
         st.caption(f"Week: {prev_start} → {prev_end}")
 
         st.markdown("**Close-out Actions**")
@@ -180,12 +192,16 @@ def render_weekly_planner(user: str, planning_week_date: date):
             with col1:
                 st.write(f"**{r['Title']}**")
             with col2:
-                status = st.selectbox("Status", ["Completed","Rollover","On Hold","Archived","In Progress"], index=4, key=f"close_prev_{gid}")
+                status = st.selectbox("Status", ["Completed","Rollover","On Hold","Archived","In Progress"],
+                                      index=4, key=f"close_prev_{gid}")
             with col3:
                 carry = st.number_input("Carry fwd poms", 0, 200, value=int(carry_default), key=f"carry_prev_{gid}")
             with col4:
                 if st.button("✅ Apply", key=f"apply_prev_{gid}"):
-                    new_status = ("Completed" if status=="Completed" else "On Hold" if status=="On Hold" else "Archived" if status=="Archived" else "In Progress")
+                    new_status = ("Completed" if status=="Completed" else
+                                  "On Hold" if status=="On Hold" else
+                                  "Archived" if status=="Archived" else
+                                  "In Progress")
                     collection_goals.update_one({"_id": gid}, {"$set": {"status": new_status}})
                     if status == "Rollover" and carry > 0:
                         curr_plan = get_or_create_weekly_plan(user, week_start)
@@ -196,6 +212,7 @@ def render_weekly_planner(user: str, planning_week_date: date):
                         save_plan_allocations(curr_plan["_id"], list(curr_goals), curr_alloc)
                     st.success("Updated")
                     st.rerun()
+
     else:
         st.info("No previous plan or nothing to close out.")
 

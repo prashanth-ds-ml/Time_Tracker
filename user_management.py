@@ -93,20 +93,36 @@ def time_to_minutes(tstr):
 # --- Data access / caches ---
 @st.cache_data(ttl=300)
 def get_user_sessions(username: str) -> pd.DataFrame:
+    # Standard shape we will always return
+    standard_cols = [
+        "type", "date", "time", "pomodoro_type", "duration",
+        "user", "goal_id", "task", "category", "created_at"
+    ]
+
     recs = list(collection_logs.find({"type": "Pomodoro", "user": username}))
     if not recs:
-        return pd.DataFrame()
+        # return an empty, column-shaped DataFrame to avoid KeyError downstream
+        return pd.DataFrame(columns=standard_cols)
+
     df = pd.DataFrame(recs)
+
+    # Ensure required columns exist even for legacy rows
+    for c in standard_cols:
+        if c not in df.columns:
+            df[c] = None
+
+    # Parse / coerce key fields
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df.dropna(subset=["date"], inplace=True)
     df["duration"] = pd.to_numeric(df["duration"], errors="coerce").fillna(0).astype(int)
-    if 'goal_id' not in df.columns:
-        df['goal_id'] = None
-    if 'category' not in df.columns:
-        df['category'] = ''
-    if 'pomodoro_type' not in df.columns:
-        df['pomodoro_type'] = 'Work'
-    return df
+
+    # Backfill defaults
+    df["pomodoro_type"] = df["pomodoro_type"].fillna("Work")
+    df["category"] = df["category"].fillna("")
+
+    # Keep only the standard view/columns in a stable order
+    return df[standard_cols]
+
 
 @st.cache_data(ttl=120)
 def get_user_settings(username: str) -> Dict:
