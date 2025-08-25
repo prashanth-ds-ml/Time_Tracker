@@ -154,6 +154,27 @@ def _drop_stray_id_indexes():
     except Exception as e:
         st.warning(f"Could not scan/drop stray _id index on weekly_plans: {e}")
 
+def _scrub_bad_id_indexes():
+    """
+    Drop any accidental _id indexes (e.g., name='_id_unique') created by older code.
+    The default MongoDB _id index is named '_id_' and must remain.
+    """
+    for col in (col_user_days, col_weekly):
+        try:
+            for ix in col.list_indexes():
+                name = ix.get("name", "")
+                key = ix.get("key", {})
+                if key == {"_id": 1} and name != "_id_":
+                    try:
+                        col.drop_index(name)
+                    except Exception:
+                        # If the server already considers it invalid, just ignore
+                        pass
+        except Exception:
+            # Ignore listing errors; nothing to show to the user
+            pass
+
+
 def ensure_indexes():
     try:
         # Clean up any accidental _id indexes from old code
