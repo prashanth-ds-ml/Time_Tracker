@@ -127,44 +127,47 @@ def _scrub_bad_id_indexes_quiet(col):
     except Exception:
         pass
 
+def _has_index_with_keys(col, keys_dict: dict) -> bool:
+    """Return True if an index with exactly these keys already exists (ignores name/options)."""
+    try:
+        for ix in col.list_indexes():
+            if dict(ix.get("key", {})) == keys_dict:
+                return True
+    except Exception:
+        pass
+    return False
+
 def ensure_indexes():
     """
-    Create only safe secondary indexes. Suppress any legacy '_id_unique' noise.
+    Create only secondary indexes that do not already exist by KEYS.
+    This avoids conflicts when an identical index exists under a different name.
     """
     try:
-        # Hard scrub first (quiet)
-        _scrub_bad_id_indexes_quiet(col_user_days)
-        _scrub_bad_id_indexes_quiet(col_weekly)
-
         # --- user_days ---
-        col_user_days.create_index([("user", 1), ("date", 1)], name="user_date")
-        col_user_days.create_index([("sessions.gid", 1)], name="sessions_gid")
-        col_user_days.create_index([("sessions.linked_gid", 1)], name="sessions_linked_gid")
-        col_user_days.create_index([("sessions.unplanned", 1)], name="sessions_unplanned")
-        col_user_days.create_index([("sessions.cat", 1)], name="sessions_cat")
+        if not _has_index_with_keys(col_user_days, {"user": 1, "date": 1}):
+            col_user_days.create_index([("user", 1), ("date", 1)], name="user_date")
+
+        for kdict, name in [
+            ({"sessions.gid": 1},        "sessions_gid"),
+            ({"sessions.linked_gid": 1}, "sessions_linked_gid"),
+            ({"sessions.unplanned": 1},  "sessions_unplanned"),
+            ({"sessions.cat": 1},        "sessions_cat"),
+        ]:
+            if not _has_index_with_keys(col_user_days, kdict):
+                col_user_days.create_index(list(kdict.items()), name=name)
 
         # --- weekly_plans ---
-        col_weekly.create_index([("user", 1), ("type", 1)], name="user_type")
-        col_weekly.create_index([("user", 1), ("week_start", 1)], name="user_week")
+        # Accept legacy names (type_user, user_weekstart) by checking KEYS only
+        if not _has_index_with_keys(col_weekly, {"user": 1, "type": 1}):
+            col_weekly.create_index([("user", 1), ("type", 1)], name="user_type")
+
+        if not _has_index_with_keys(col_weekly, {"user": 1, "week_start": 1}):
+            col_weekly.create_index([("user", 1), ("week_start", 1)], name="user_week")
 
         st.toast("Indexes ensured.")
-    except Exception as e:
-        # Swallow the known noisy error and any remnants referencing _id_unique
-        msg = str(e)
-        if ("The field 'unique' is not valid for an _id index specification" in msg) or ("_id_unique" in msg):
-            # Try one last silent scrub and exit without UI noise
-            _scrub_bad_id_indexes_quiet(col_user_days)
-            _scrub_bad_id_indexes_quiet(col_weekly)
-            return
-        # For anything else, stay quiet to keep UI clean
+    except Exception:
+        # Keep UI silent; key-based guard prevents the noisy error anyway.
         return
-
-# Call a quiet scrub once at import time too
-try:
-    _scrub_bad_id_indexes_quiet(col_user_days)
-    _scrub_bad_id_indexes_quiet(col_weekly)
-except Exception:
-    pass
 
 def list_users() -> List[str]:
     users_w = col_weekly.distinct("user") or []
