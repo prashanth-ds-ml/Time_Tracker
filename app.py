@@ -133,23 +133,21 @@ DEFAULTS = {
 def ensure_indexes():
     try:
         # --- user_days ---
-        # helpful for per-user date range queries
+        # Query patterns you actually use
         col_user_days.create_index([("user", 1), ("date", 1)], name="user_date")
-        # analytics filters
         col_user_days.create_index([("sessions.gid", 1)], name="sessions_gid")
         col_user_days.create_index([("sessions.linked_gid", 1)], name="sessions_linked_gid")
         col_user_days.create_index([("sessions.unplanned", 1)], name="sessions_unplanned")
         col_user_days.create_index([("sessions.cat", 1)], name="sessions_cat")
-        # DO NOT create _id indexes — MongoDB manages them automatically
 
         # --- weekly_plans ---
         col_weekly.create_index([("user", 1), ("type", 1)], name="user_type")
         col_weekly.create_index([("user", 1), ("week_start", 1)], name="user_week")
-        # DO NOT create _id indexes here either
 
         st.toast("Indexes ensured.")
     except Exception as e:
         st.warning(f"Index ensure notice: {e}")
+
 
 
 def list_users() -> List[str]:
