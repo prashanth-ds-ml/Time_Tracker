@@ -110,49 +110,59 @@ DEFAULTS = {
     "custom_categories": ["Learning", "Projects", "Research", "Planning"]
 }
 
-def _scrub_bad_id_indexes():
+def _scrub_bad_id_indexes_quiet(col):
     """
-    Drop any accidental _id indexes (e.g., name!='_id_') created by older code.
-    MongoDB already has the built-in _id_ index; we must not create another.
+    Drop any accidental _id indexes (anything with key {'_id': 1} where name != '_id_').
+    Never surfaces errors to UI.
     """
-    for col in (col_user_days, col_weekly):
-        try:
-            for ix in col.list_indexes():
-                name = ix.get("name", "")
-                key = ix.get("key", {})
-                if key == {"_id": 1} and name != "_id_":
-                    try:
-                        col.drop_index(name)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+    try:
+        for ix in col.list_indexes():
+            name = ix.get("name", "")
+            key = dict(ix.get("key", {}))
+            if key == {"_id": 1} and name != "_id_":
+                try:
+                    col.drop_index(name)
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
 def ensure_indexes():
+    """
+    Create only safe secondary indexes. Suppress any legacy '_id_unique' noise.
+    """
     try:
-        _scrub_bad_id_indexes()
+        # Hard scrub first (quiet)
+        _scrub_bad_id_indexes_quiet(col_user_days)
+        _scrub_bad_id_indexes_quiet(col_weekly)
 
-        # user_days — secondary indexes only
+        # --- user_days ---
         col_user_days.create_index([("user", 1), ("date", 1)], name="user_date")
         col_user_days.create_index([("sessions.gid", 1)], name="sessions_gid")
         col_user_days.create_index([("sessions.linked_gid", 1)], name="sessions_linked_gid")
         col_user_days.create_index([("sessions.unplanned", 1)], name="sessions_unplanned")
         col_user_days.create_index([("sessions.cat", 1)], name="sessions_cat")
 
-        # weekly_plans — secondary indexes only
+        # --- weekly_plans ---
         col_weekly.create_index([("user", 1), ("type", 1)], name="user_type")
         col_weekly.create_index([("user", 1), ("week_start", 1)], name="user_week")
 
         st.toast("Indexes ensured.")
     except Exception as e:
+        # Swallow the known noisy error and any remnants referencing _id_unique
         msg = str(e)
-        if "The field 'unique' is not valid for an _id index specification" in msg or "_id_unique" in msg:
+        if ("The field 'unique' is not valid for an _id index specification" in msg) or ("_id_unique" in msg):
+            # Try one last silent scrub and exit without UI noise
+            _scrub_bad_id_indexes_quiet(col_user_days)
+            _scrub_bad_id_indexes_quiet(col_weekly)
             return
-        st.toast("Index setup skipped due to a non-critical error.", icon="⚠️")
+        # For anything else, stay quiet to keep UI clean
+        return
 
-# scrub at startup (safe)
+# Call a quiet scrub once at import time too
 try:
-    _scrub_bad_id_indexes()
+    _scrub_bad_id_indexes_quiet(col_user_days)
+    _scrub_bad_id_indexes_quiet(col_weekly)
 except Exception:
     pass
 
