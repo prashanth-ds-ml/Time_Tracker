@@ -132,17 +132,25 @@ DEFAULTS = {
 
 def ensure_indexes():
     try:
-        col_user_days.create_index([("user", 1), ("date", 1)], name="user_date", unique=False)
-        col_user_days.create_index([("_id", 1)], name="_id", unique=True)
+        # --- user_days ---
+        # helpful for per-user date range queries
+        col_user_days.create_index([("user", 1), ("date", 1)], name="user_date")
+        # analytics filters
         col_user_days.create_index([("sessions.gid", 1)], name="sessions_gid")
+        col_user_days.create_index([("sessions.linked_gid", 1)], name="sessions_linked_gid")
         col_user_days.create_index([("sessions.unplanned", 1)], name="sessions_unplanned")
         col_user_days.create_index([("sessions.cat", 1)], name="sessions_cat")
+        # DO NOT create _id indexes — MongoDB manages them automatically
+
+        # --- weekly_plans ---
         col_weekly.create_index([("user", 1), ("type", 1)], name="user_type")
         col_weekly.create_index([("user", 1), ("week_start", 1)], name="user_week")
-        col_weekly.create_index([("_id", 1)], name="_id_wp", unique=True)
+        # DO NOT create _id indexes here either
+
         st.toast("Indexes ensured.")
     except Exception as e:
-        st.warning(f"Index notice: {e}")
+        st.warning(f"Index ensure notice: {e}")
+
 
 def list_users() -> List[str]:
     users_w = col_weekly.distinct("user") or []
