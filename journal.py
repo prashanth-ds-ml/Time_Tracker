@@ -1,11 +1,12 @@
-import streamlit as st, pandas as pd
-from datetime import timedelta
-from user_management import now_ist, collection_reflections, collection_logs
-import hashlib
+# journal.py
+import streamlit as st
+import pandas as pd
+from db import now_ist, get_or_create_user_day, save_reflection, set_daily_target, get_daily_target, add_note
 
 def render_journal(user: str):
     st.header("🧾 Journal")
-    tab1, tab2, tab3 = st.tabs(["Reflection", "Add Note", "Browse Notes"])
+    tab1, tab2, tab3 = st.tabs(["Reflection", "Daily Target", "Notes"])
+
     today_iso = now_ist().date().isoformat()
 
     with tab1:
@@ -16,53 +17,52 @@ def render_journal(user: str):
             blockers = st.text_area("Blockers / distractions")
             notes = st.text_area("Insights / anything to note")
             submitted = st.form_submit_button("💾 Save Reflection")
-        if submitted:
-            collection_reflections.update_one(
-                {"user": user, "date": today_iso},
-                {"$set": {
-                    "user": user, "date": today_iso, "aligned": aligned,
-                    "focus_rating": int(rating), "blockers": blockers.strip(),
-                    "notes": notes.strip()
-                }},
-                upsert=True
-            )
-            st.success("Saved ✨")
+            if submitted:
+                save_reflection(user, aligned, rating, blockers.strip(), notes.strip(), today_iso)
+                st.success("Saved ✨")
 
-        recs = list(collection_reflections.find({"user": user}).sort("date", -1).limit(14))
-        if recs:
-            st.subheader("Recent Reflections")
-            df = pd.DataFrame(recs)
-            st.dataframe(df[["date","aligned","focus_rating","blockers","notes"]],
-                         use_container_width=True, hide_index=True)
+        # recent (last 14 days)
+        # read via user_day docs
+        st.subheader("Recent Reflections")
+        # pull 14 days
+        rows = []
+        for i in range(14):
+            d = (now_ist().date() - pd.Timedelta(days=i)).isoformat()
+            doc = get_or_create_user_day(user, d)
+            if doc.get("reflection"):
+                r = doc["reflection"]
+                rows.append({"date": d, "aligned": r.get("aligned"), "focus_rating": r.get("focus_rating"),
+                             "blockers": r.get("blockers",""), "notes": r.get("notes","")})
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("No recent reflections yet.")
 
     with tab2:
-        st.subheader("Add Note")
-        with st.form("note_form", clear_on_submit=True):
-            c1, c2 = st.columns([1,3])
-            with c1: d = st.date_input("Date", now_ist())
-            with c2: content = st.text_area("Your thoughts...", height=140)
-            save_note = st.form_submit_button("💾 Save Note")
-        if save_note:
-            if content.strip():
-                nid = hashlib.sha256(f"{d.date().isoformat()}_{content}_{user}".encode()).hexdigest()
-                doc = {"_id": nid, "type":"Note", "date": d.date().isoformat(),
-                       "content": content.strip(), "user": user}
-                collection_logs.update_one({"_id": nid}, {"$set": doc}, upsert=True)
-                st.success("Saved")
-            else:
-                st.warning("Add some content")
+        st.subheader("Daily Target")
+        cur = get_daily_target(user, today_iso)
+        if cur is not None:
+            st.info(f"Today's target: **{cur}**")
+            new = st.number_input("Update target", 1, 12, value=int(cur))
+            if st.button("💾 Update target"):
+                set_daily_target(user, int(new), today_iso)
+                st.success("Updated target.")
+                st.rerun()
+        else:
+            val = st.number_input("Set target (pomodoros)", 1, 12, value=1)
+            if st.button("Set"):
+                set_daily_target(user, int(val), today_iso)
+                st.success("Saved target.")
+                st.rerun()
 
     with tab3:
-        st.subheader("Browse Notes")
-        c1, c2 = st.columns(2)
-        with c1: start = st.date_input("From", now_ist().date()-timedelta(days=7))
-        with c2: end = st.date_input("To", now_ist().date())
-        q = {"type":"Note","user": user, "date": {"$gte": start.isoformat(), "$lte": end.isoformat()}}
-        notes = list(collection_logs.find(q).sort("date", -1))
-        if notes:
-            for n in notes:
-                st.subheader(f"📅 {n['date']}")
-                st.write(n['content'])
-                st.divider()
-        else:
-            st.info("No notes in this range")
+        st.subheader("Notes")
+        with st.form("note_form", clear_on_submit=True):
+            content = st.text_area("Your thoughts...", height=140)
+            sub = st.form_submit_button("💾 Save Note")
+            if sub:
+                if content.strip():
+                    add_note(user, content.strip(), today_iso)
+                    st.success("Saved")
+                else:
+                    st.warning("Add some content")
