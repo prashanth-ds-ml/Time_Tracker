@@ -1,3 +1,4 @@
+# app.py
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List, Tuple
@@ -8,7 +9,6 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 from pymongo import MongoClient
-import altair as alt
 import matplotlib.pyplot as plt
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -39,7 +39,6 @@ def week_start_end_ist(dt_ist: datetime) -> Tuple[str, str, str]:
 
 def monday_from_week_key(week_key: str) -> datetime:
     year, wk = map(int, week_key.split("-"))
-    # Monday=1
     return IST.localize(datetime.fromisocalendar(year, wk, 1))
 
 def prev_week_key(week_key: str) -> str:
@@ -53,6 +52,15 @@ def pom_equiv(minutes: int) -> float:
 
 def pct(n, d) -> float:
     return (n / d * 100.0) if d else 0.0
+
+def safe_last_n_slider(label: str, available_count: int, default: int = 6, cap: int = 12, key: str = "lastn"):
+    """
+    Returns a valid slider value even when there are 0–1 items.
+    Caller should still guard when available_count == 0.
+    """
+    maxv = min(cap, max(1, int(available_count)))
+    val = min(default, maxv)
+    return st.slider(label, 1, maxv, value=val, key=key)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Streamlit config
@@ -236,7 +244,7 @@ else:
 tab_timer, tab_planner, tab_analytics = st.tabs(["⏱️ Timer & Log", "🗂️ Weekly Planner", "📈 Analytics"])
 
 # =============================================================================
-# TAB 1: Timer & Log (manual + Live Timer)
+# TAB 1: Timer & Log (manual + Live Timer with refresh)
 # =============================================================================
 with tab_timer:
     st.header("⏱️ Focus Timer")
@@ -373,7 +381,7 @@ with tab_timer:
 
     st.divider()
 
-    # ── Live Timer (auto-insert + optional auto-break)
+    # ── Live Timer (with manual refresh to update countdown)
     st.subheader("⏳ Live Timer (beta)")
     if "timer" not in st.session_state:
         st.session_state.timer = {
@@ -388,13 +396,16 @@ with tab_timer:
     with st.form("live_timer_form", clear_on_submit=False):
         colA, colB, colC = st.columns(3)
         with colA:
-            live_type = st.selectbox("Type", ["Work (focus)","Work (activity)","Break"], index=0)
+            try:
+                live_type = st.segmented_control("Type", ["Work (focus)","Work (activity)","Break"], default="Work (focus)")
+            except Exception:
+                live_type = st.selectbox("Type", ["Work (focus)","Work (activity)","Break"], index=0)
             dur_live = st.number_input("Duration (min)", 1, 180, value=25 if "Work" in live_type else 5)
         with colB:
             auto_break = st.checkbox("Auto-break after Work", value=True)
             break_min = st.number_input("Break length (min)", 1, 30, value=5)
         with colC:
-            end_at_now = st.checkbox("Start now", value=True)
+            _ = st.caption("Timer starts immediately when you click Start.")
 
         # Goal / task params
         kind = "focus"; activity_type=None; intensity=None; deep_live = (dur_live >= 23)
@@ -414,8 +425,8 @@ with tab_timer:
                     gid = it["goal_id"]
                     gtitle = goals_map.get(gid, {}).get("title", gid)
                     options.append((f"{gtitle} — planned {it['planned_current']} (backlog {it['backlog_in']})", gid, it["planned_current"]))
-                label = st.selectbox("Choose goal", options=[o[0] for o in options])
-                sel = next((o for o in options if o[0] == label), None)
+                label = st.selectbox("Choose goal", options=[o[0] for o in options]) if options else None
+                sel = next((o for o in options if o[0] == label), None) if label else None
                 if sel:
                     goal_id = sel[1]; goal_mode="weekly"
                     alloc_bucket = determine_alloc_bucket(USER_ID, week_key, goal_id, sel[2])
@@ -438,19 +449,18 @@ with tab_timer:
             "started_at": now_ist(), "end_ts": now_ist() + timedelta(minutes=int(dur_live))
         })
 
-    # Live view
     if timer["running"]:
         remaining = (timer["end_ts"] - now_ist()).total_seconds()
         mins = max(int(remaining // 60), 0)
         secs = max(int(remaining % 60), 0)
         st.info(f"⏳ Time left: **{mins:02d}:{secs:02d}**  •  Type: {('Work' if timer['t']=='W' else 'Break')}  •  Dur: {timer['dur_min']}m")
-        st.progress(min(1.0, 1 - (remaining / max(1, timer["dur_min"] * 60))), text="Counting down...")
-        st.experimental_rerun() if remaining > 0 else None
-
-        # Controls
-        colL, colR = st.columns(2)
+        colL, colM, colR = st.columns(3)
+        refresh = colM.button("🔄 Refresh countdown", use_container_width=True)
         stop_now = colL.button("⏹️ Stop / Cancel", use_container_width=True)
         complete_early = colR.button("✅ Complete now", use_container_width=True)
+
+        if refresh:
+            st.experimental_rerun()
         if stop_now:
             timer["running"] = False
             st.warning("Timer canceled.")
@@ -459,7 +469,6 @@ with tab_timer:
             timer["end_ts"] = now_ist()
             remaining = 0
 
-        # Completion
         if remaining <= 0 and not timer["completed"]:
             ended_at = timer["end_ts"]
             started_at = timer["started_at"]
@@ -478,7 +487,6 @@ with tab_timer:
 
             # Auto-break
             if timer["t"] == "W" and timer["auto_break"] and timer["break_min"] > 0:
-                # chain break timer
                 timer.update({
                     "running": True, "completed": False,
                     "t": "B", "dur_min": timer["break_min"], "kind": None,
@@ -517,44 +525,35 @@ with tab_timer:
 # =============================================================================
 with tab_planner:
     st.header("🗂️ Weekly Planner")
-    # Choose week (default current)
     colW1, colW2 = st.columns([1,1])
     with colW1:
         wk = st.text_input("Week key (YYYY-WW)", value=week_key)
     with colW2:
-        # capacity inputs (defaults from user prefs if available)
         udoc = get_user(USER_ID) or {}
         prefs = (udoc.get("prefs") or {})
-        wkday_default = prefs.get("weekday_poms", 3)
-        wkend_default = prefs.get("weekend_poms", 6)
-        wkday = st.number_input("Weekday poms (per day)", 0, 20, value=int(wkday_default))
-        wkend = st.number_input("Weekend poms (per day)", 0, 30, value=int(wkend_default))
+        wkday_default = int(prefs.get("weekday_poms", 3))
+        wkend_default = int(prefs.get("weekend_poms", 6))
+        wkday = st.number_input("Weekday poms (per day)", 0, 20, value=wkday_default)
+        wkend = st.number_input("Weekend poms (per day)", 0, 30, value=wkend_default)
         total_capacity = wkday*5 + wkend*2
     st.caption(f"Total capacity calculated for the week: **{total_capacity}** poms.")
 
-    # Load existing plan if any (for chosen week)
     existing = get_week_plan(USER_ID, wk)
     prev_wk = prev_week_key(wk)
     prev_plan = get_week_plan(USER_ID, prev_wk)
-
-    # Prefill carryover from prev week
     prefill = st.checkbox(f"Prefill backlog from previous week ({prev_wk})", value=True)
 
-    # Build editable goals table
     goals = list(db.goals.find({"user": USER_ID}))
     rank_weight_map = (prefs.get("rank_weight_map") or {"1":5,"2":3,"3":2,"4":1,"5":1})
     rank_choices = ["1","2","3","4","5"]
 
-    # Prepare rows
     def carryover_for(gid: str) -> int:
         if not prev_plan:
             return 0
-        # compute leftover = total_target - actual (rounded) last week
         it_prev = next((it for it in prev_plan.get("items", []) if it["goal_id"] == gid), None)
         if not it_prev:
             return 0
         total_target = int(it_prev.get("total_target", 0))
-        # actual PE across both buckets
         pe_doc = next(iter(db.sessions.aggregate([
             {"$match": {"user": USER_ID, "week_key": prev_wk, "t":"W", "goal_id": gid}},
             {"$group": {"_id": None, "pe": {"$sum": {"$ifNull": ["$pom_equiv", {"$divide": ["$dur_min", 25.0]}]}}}}
@@ -562,9 +561,7 @@ with tab_planner:
         actual = int(round(float(pe_doc["pe"]) if pe_doc else 0.0))
         return max(total_target - actual, 0)
 
-    # Merge with existing plan items if present
     existing_items = {it["goal_id"]: it for it in (existing.get("items", []) if existing else [])}
-
     rows = []
     for g in goals:
         gid = g["_id"]
@@ -572,7 +569,7 @@ with tab_planner:
         backlog_in = int(ex["backlog_in"]) if ex else (carryover_for(gid) if prefill else 0)
         rank_str = str(ex["priority_rank"]) if ex else "3"
         rows.append({
-            "include": bool(ex) or True,  # default include
+            "include": bool(ex) or True,
             "goal_id": gid,
             "title": g.get("title",""),
             "category": g.get("category",""),
@@ -584,29 +581,32 @@ with tab_planner:
             "notes": ex["notes"] if ex else ""
         })
 
-    df = pd.DataFrame(rows)
-    edited = st.data_editor(
-        df,
-        column_config={
-            "include": st.column_config.CheckboxColumn("Include"),
-            "rank": st.column_config.SelectboxColumn("Rank (1 high)", options=rank_choices, width="small"),
-            "status_at_plan": st.column_config.SelectboxColumn("Status", options=["In Progress","On Hold","Completed"]),
-            "planned_current": st.column_config.NumberColumn("Planned (current)", step=1, min_value=0),
-            "backlog_in": st.column_config.NumberColumn("Backlog In", step=1, min_value=0),
-            "notes": st.column_config.TextColumn("Notes"),
-        },
-        use_container_width=True,
-        hide_index=True,
-        num_rows="fixed"
-    )
+    if rows:
+        df = pd.DataFrame(rows)
+        edited = st.data_editor(
+            df,
+            column_config={
+                "include": st.column_config.CheckboxColumn("Include"),
+                "rank": st.column_config.SelectboxColumn("Rank (1 high)", options=rank_choices, width="small"),
+                "status_at_plan": st.column_config.SelectboxColumn("Status", options=["In Progress","On Hold","Completed"]),
+                "planned_current": st.column_config.NumberColumn("Planned (current)", step=1, min_value=0),
+                "backlog_in": st.column_config.NumberColumn("Backlog In", step=1, min_value=0),
+                "notes": st.column_config.TextColumn("Notes"),
+            },
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed"
+        )
+    else:
+        st.info("No goals found. Add goals in the DB to plan your week.")
+        edited = pd.DataFrame([])
 
-    # Auto-allocate based on ranks/weights
     colA1, colA2, colA3 = st.columns([1,1,1])
     auto_go = colA1.button("⚖️ Auto-allocate by rank")
     clear_plan = colA2.button("🧹 Clear planned_current")
     save_plan = colA3.button("💾 Save plan")
 
-    if auto_go:
+    if auto_go and not edited.empty:
         m = edited[edited["include"]==True].copy()
         if m.empty or total_capacity <= 0:
             st.warning("Select at least one goal and set capacity > 0.")
@@ -616,30 +616,27 @@ with tab_planner:
             shares = (m["weight"] / max(weights_sum, 1)) * total_capacity
             base = np.floor(shares).astype(int)
             left = total_capacity - base.sum()
-            # distribute remainder by largest fractional part
             frac = shares - base
             order = np.argsort(-frac.values)
             for i in range(int(left)):
                 base.iloc[order[i]] += 1
-            # write back
             edited.loc[m.index, "planned_current"] = base.values
             st.success("Auto-allocation applied. Review and adjust if needed.")
 
-    if clear_plan:
+    if clear_plan and not edited.empty:
         edited["planned_current"] = 0
         st.info("Cleared plan allocations.")
 
-    # Compute totals & invariants
-    planned_sum = int(edited.loc[edited["include"]==True, "planned_current"].sum())
-    backlog_sum = int(edited.loc[edited["include"]==True, "backlog_in"].sum())
-    st.caption(f"Planned current sum: **{planned_sum}** / capacity **{total_capacity}** • Backlog in total: **{backlog_sum}**")
-    if planned_sum != total_capacity:
-        st.warning("Sum of planned_current should equal capacity total for the week.")
-    else:
-        st.success("Planned_current matches capacity total ✅")
+    if not edited.empty:
+        planned_sum = int(edited.loc[edited["include"]==True, "planned_current"].sum())
+        backlog_sum = int(edited.loc[edited["include"]==True, "backlog_in"].sum())
+        st.caption(f"Planned current sum: **{planned_sum}** / capacity **{total_capacity}** • Backlog in total: **{backlog_sum}**")
+        if planned_sum != total_capacity:
+            st.warning("Sum of planned_current should equal capacity total for the week.")
+        else:
+            st.success("Planned_current matches capacity total ✅")
 
-    # Save
-    if save_plan:
+    if save_plan and not edited.empty:
         mon = monday_from_week_key(wk).date().isoformat()
         sun = (monday_from_week_key(wk).date() + timedelta(days=6)).isoformat()
         items = []
@@ -666,101 +663,111 @@ with tab_planner:
             st.experimental_rerun()
 
 # =============================================================================
-# TAB 3: Analytics
+# TAB 3: Analytics (safe slider + guards)
 # =============================================================================
 with tab_analytics:
     st.header("📈 Analytics")
 
-    # Choose range (last N weeks)
     weeks_sessions = sorted(db.sessions.distinct("week_key", {"user": USER_ID, "t": "W"}))
-    weeks_plans = sorted(db.weekly_plans.distinct("week_key", {"user": USER_ID}))
-    all_weeks = sorted(set(weeks_sessions) | set(weeks_plans))
-    if not all_weeks:
-        st.info("No data yet.")
+    weeks_plans    = sorted(db.weekly_plans.distinct("week_key", {"user": USER_ID}))
+    all_weeks      = sorted(set(weeks_sessions) | set(weeks_plans))
+
+    if len(all_weeks) == 0:
+        st.info("No data yet. Log some sessions or save a weekly plan to see analytics.")
     else:
-        last_n = st.slider("Show last N weeks", 1, min(12, len(all_weeks)), value=min(6, len(all_weeks)))
-        weeks_view = all_weeks[-last_n:]
+        last_n = safe_last_n_slider("Show last N weeks", available_count=len(all_weeks), default=6, cap=12, key="lastn_analytics")
+        weeks_view = all_weeks[-last_n:] if last_n > 0 else []
 
-        # compute metrics per week
-        rows = []
-        for W in weeks_view:
-            planW = get_week_plan(USER_ID, W)
-            planned = sum(int(it.get("planned_current", 0)) for it in (planW.get("items", []) if planW else []))
+        if not weeks_view:
+            st.info("No weeks selected.")
+        else:
+            rows = []
+            for W in weeks_view:
+                planW = get_week_plan(USER_ID, W)
+                planned = sum(int(it.get("planned_current", 0)) for it in (planW.get("items", []) if planW else []))
 
-            # actual PE
-            pe_doc = next(iter(db.sessions.aggregate([
-                {"$match": {"user": USER_ID, "week_key": W, "t": "W"}},
-                {"$group": {"_id": None, "pe": {"$sum": {"$ifNull": ["$pom_equiv", {"$divide": ["$dur_min", 25.0]}]}}}}
-            ])), None)
-            actual_pe = float(pe_doc["pe"]) if pe_doc else 0.0
+                # actual PE
+                pe_doc = next(iter(db.sessions.aggregate([
+                    {"$match": {"user": USER_ID, "week_key": W, "t": "W"}},
+                    {"$group": {"_id": None, "pe": {"$sum": {"$ifNull": ["$pom_equiv", {"$divide": ["$dur_min", 25.0]}]}}}}
+                ])), None)
+                actual_pe = float(pe_doc["pe"]) if pe_doc else 0.0
 
-            focus_total = db.sessions.count_documents({"user": USER_ID, "week_key": W, "t": "W", "kind": {"$ne": "activity"}})
-            deep = db.sessions.count_documents({"user": USER_ID, "week_key": W, "t": "W", "kind": {"$ne": "activity"}, "deep_work": True})
-            deep_pct = pct(deep, focus_total)
+                focus_total = db.sessions.count_documents({"user": USER_ID, "week_key": W, "t": "W", "kind": {"$ne": "activity"}})
+                deep = db.sessions.count_documents({"user": USER_ID, "week_key": W, "t": "W", "kind": {"$ne": "activity"}, "deep_work": True})
+                deep_pct = pct(deep, focus_total)
 
-            valid_breaks = db.sessions.count_documents({
-                "user": USER_ID, "week_key": W, "t": "B", "dur_min": {"$gte": 4},
-                "$or": [{"skipped": {"$exists": False}}, {"skipped": {"$ne": True}}]
-            })
-            break_pct = pct(min(valid_breaks, focus_total), focus_total)
+                valid_breaks = db.sessions.count_documents({
+                    "user": USER_ID, "week_key": W, "t": "B", "dur_min": {"$gte": 4},
+                    "$or": [{"skipped": {"$exists": False}}, {"skipped": {"$ne": True}}]
+                })
+                break_pct = pct(min(valid_breaks, focus_total), focus_total)
 
-            pe_by_mode = {row["_id"]: row["pe"] for row in db.sessions.aggregate([
-                {"$match": {"user": USER_ID, "week_key": W, "t": "W"}},
-                {"$group": {"_id": "$goal_mode", "pe": {"$sum": {"$ifNull": ["$pom_equiv", {"$divide": ["$dur_min", 25.0]}]}}}}
-            ])}
-            unplan_pct = pct(float(pe_by_mode.get("custom", 0.0)), actual_pe)
+                pe_by_mode = {row["_id"]: row["pe"] for row in db.sessions.aggregate([
+                    {"$match": {"user": USER_ID, "week_key": W, "t": "W"}},
+                    {"$group": {"_id": "$goal_mode", "pe": {"$sum": {"$ifNull": ["$pom_equiv", {"$divide": ["$dur_min", 25.0]}]}}}}
+                ])}
+                unplan_pct = pct(float(pe_by_mode.get("custom", 0.0)), actual_pe)
 
-            adh = pct(min(actual_pe, planned), planned) if planned else 0.0
-            rows.append({"week": W, "planned": planned, "actual_pe": round(actual_pe,1), "adherence_pct": round(adh,1),
-                         "deep_pct": round(deep_pct,1), "break_pct": round(break_pct,1), "unplanned_pct": round(unplan_pct,1)})
+                adh = pct(min(actual_pe, planned), planned) if planned else 0.0
+                rows.append({
+                    "week": W, "planned": planned, "actual_pe": round(actual_pe, 1),
+                    "adherence_pct": round(adh, 1), "deep_pct": round(deep_pct, 1),
+                    "break_pct": round(break_pct, 1), "unplanned_pct": round(unplan_pct, 1)
+                })
 
-        df = pd.DataFrame(rows)
-        st.dataframe(df, use_container_width=True, hide_index=True)
+            df = pd.DataFrame(rows)
+            st.dataframe(df, use_container_width=True, hide_index=True)
 
-        # Charts
-        c1, c2 = st.columns(2)
-        with c1:
-            st.subheader("Adherence % (line)")
-            st.line_chart(df.set_index("week")["adherence_pct"])
-        with c2:
-            st.subheader("Deep Work % (bar)")
-            st.bar_chart(df.set_index("week")["deep_pct"])
+            c1, c2 = st.columns(2)
+            with c1:
+                st.subheader("Adherence % (line)")
+                st.line_chart(df.set_index("week")["adherence_pct"])
+            with c2:
+                st.subheader("Deep Work % (bar)")
+                st.bar_chart(df.set_index("week")["deep_pct"])
 
-        c3, c4 = st.columns(2)
-        with c3:
-            st.subheader("Unplanned % (bar)")
-            st.bar_chart(df.set_index("week")["unplanned_pct"])
-        with c4:
-            st.subheader("Actual PE (bars)")
-            st.bar_chart(df.set_index("week")["actual_pe"])
+            c3, c4 = st.columns(2)
+            with c3:
+                st.subheader("Unplanned % (bar)")
+                st.bar_chart(df.set_index("week")["unplanned_pct"])
+            with c4:
+                st.subheader("Actual PE (bars)")
+                st.bar_chart(df.set_index("week")["actual_pe"])
 
-        st.divider()
-        st.subheader("Career vs Wellbeing (selected week)")
-        sel_week = st.selectbox("Pick a week", weeks_view, index=len(weeks_view)-1)
+            st.divider()
+            st.subheader("Career vs Wellbeing (selected week)")
+            idx_last = max(0, len(weeks_view) - 1)
+            sel_week = st.selectbox("Pick a week", weeks_view, index=idx_last, key="sel_week_analytics")
 
-        # domain map (goals)
-        goal_domain = {}
-        for g in db.goals.find({"user": USER_ID}, {"_id":1, "category":1}):
-            cat = (g.get("category") or "").lower()
-            goal_domain[g["_id"]] = "Wellbeing" if cat in ["health","wellbeing"] else "Career"
+            # domain map for pie
+            goal_domain = {}
+            for g in db.goals.find({"user": USER_ID}, {"_id":1, "category":1}):
+                cat = (g.get("category") or "").lower()
+                goal_domain[g["_id"]] = "Wellbeing" if cat in ["health","wellbeing"] else "Career"
 
-        career = 0.0; wellbeing = 0.0
-        for s in db.sessions.find({"user": USER_ID, "week_key": sel_week, "t":"W"},
-                                  {"goal_id":1,"kind":1,"activity_type":1,"pom_equiv":1,"dur_min":1}):
-            pe = s.get("pom_equiv") or (s.get("dur_min",0)/25.0)
-            if s.get("kind") == "activity":
-                wellbeing += pe
+            career = 0.0; wellbeing = 0.0
+            for s in db.sessions.find({"user": USER_ID, "week_key": sel_week, "t":"W"},
+                                      {"goal_id":1,"kind":1,"activity_type":1,"pom_equiv":1,"dur_min":1}):
+                pe = s.get("pom_equiv") or (s.get("dur_min",0)/25.0)
+                if s.get("kind") == "activity":
+                    wellbeing += pe
+                else:
+                    dom = goal_domain.get(s.get("goal_id"), "Career")
+                    wellbeing += pe if dom == "Wellbeing" else 0.0
+                    career += pe if dom != "Wellbeing" else 0.0
+
+            total = career + wellbeing
+            if total <= 0:
+                st.info("No work recorded in the selected week.")
             else:
-                dom = goal_domain.get(s.get("goal_id"), "Career")
-                if dom == "Wellbeing": wellbeing += pe
-                else: career += pe
-        total = career + wellbeing
-        cp = pct(career, total); wp = pct(wellbeing, total)
-
-        fig, ax = plt.subplots()
-        ax.pie([career, wellbeing], labels=[f"Career {cp:.1f}%", f"Wellbeing {wp:.1f}%"], autopct="%1.1f%%", startangle=90)
-        ax.axis('equal')
-        st.pyplot(fig)
+                cp = pct(career, total); wp = pct(wellbeing, total)
+                fig, ax = plt.subplots()
+                ax.pie([career, wellbeing],
+                       labels=[f"Career {cp:.1f}%", f"Wellbeing {wp:.1f}%"],
+                       autopct="%1.1f%%", startangle=90)
+                ax.axis('equal')
+                st.pyplot(fig)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Footer
