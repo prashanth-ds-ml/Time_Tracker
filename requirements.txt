@@ -4,3 +4,7 @@ plotly
 plotly-express
 pymongo
 pytz
+matplotlib
+numpy
+pandas
+python-dotenv
