@@ -13,6 +13,22 @@ from streamlit.errors import StreamlitAPIException
 from pymongo import MongoClient
 import matplotlib.pyplot as plt
 
+# ─ Live refresh helper (best-effort) ─
+def live_autorefresh(active: bool, key: str = "live_tick") -> bool:
+    """
+    Try to auto-refresh the page every second while the timer is running.
+    Uses streamlit-autorefresh if available; otherwise returns False (manual fallback).
+    """
+    if not active:
+        return False
+    try:
+        # optional dependency: pip install streamlit-autorefresh
+        from streamlit_autorefresh import st_autorefresh
+        st_autorefresh(interval=1000, limit=None, key=key)
+        return True
+    except Exception:
+        return False
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Config / utils
 # ──────────────────────────────────────────────────────────────────────────────
@@ -490,15 +506,55 @@ with tab_timer:
             })
 
         # Countdown
+                # Countdown
         if timer["running"]:
-            remaining = (timer["end_ts"] - now_ist()).total_seconds()
-            mins = max(int(remaining // 60), 0)
-            secs = max(int(remaining % 60), 0)
+            # try to auto-refresh every second; show if it’s on
+            auto_on = live_autorefresh(True, key="timer_live_tick")
+
+            total_secs = max(int(timer["dur_min"]) * 60, 1)
+            remaining_secs = max(int((timer["end_ts"] - now_ist()).total_seconds()), 0)
+            elapsed_secs = total_secs - remaining_secs
+            pct_done = min(max(elapsed_secs / total_secs, 0.0), 1.0)
+
+            rem_m = remaining_secs // 60
+            rem_s = remaining_secs % 60
+            started_lbl = timer["started_at"].strftime("%H:%M")
+            ends_lbl    = timer["end_ts"].strftime("%H:%M")
             tlabel = "Work (focus)" if (timer["kind"] == "focus") else "Activity"
-            st.info(f"⏳ Time left: **{mins:02d}:{secs:02d}**  •  Type: {tlabel}  •  Dur: {timer['dur_min']}m")
+
+            # Big, obvious timer header
+            st.markdown(
+                f"""
+                <div style="font-size:1.2rem;margin-bottom:0.25rem;">
+                  ⏳ <b>{tlabel}</b> — {timer['dur_min']} min
+                </div>
+                <div style="font-size:2.4rem;font-weight:700;letter-spacing:1px;">
+                  {rem_m:02d}:{rem_s:02d}
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+            # Progress bar that moves as time passes
+            st.progress(pct_done, text=f"Elapsed {elapsed_secs//60:02d}:{elapsed_secs%60:02d} • Remaining {rem_m:02d}:{rem_s:02d}")
+
+            # Meta info row
+            meta1, meta2, meta3 = st.columns([1, 1, 1])
+            with meta1:
+                st.caption(f"Started: **{started_lbl}**")
+            with meta2:
+                st.caption(f"Ends: **{ends_lbl}**")
+            with meta3:
+                tick = now_ist().strftime("%H:%M:%S")
+                st.caption(("Auto-refresh: **ON** • " if auto_on else "Auto-refresh: **OFF** • ") + f"Last tick: **{tick}**")
+
+            # Controls
             colL, colM, colR = st.columns(3)
-            refresh = colM.button("🔄 Refresh countdown", use_container_width=True)
             stop_now = colL.button("⏹️ Stop / Cancel", use_container_width=True)
+            if not auto_on:
+                refresh = colM.button("🔄 Update timer", use_container_width=True)
+            else:
+                refresh = False
             complete_early = colR.button("✅ Complete now", use_container_width=True)
 
             if refresh:
@@ -509,12 +565,13 @@ with tab_timer:
                 st.rerun()
             if complete_early:
                 timer["end_ts"] = now_ist()
-                remaining = 0
+                remaining_secs = 0
 
-            if remaining <= 0 and not timer["completed"]:
+            # When time is up, finalize this session
+            if remaining_secs <= 0 and not timer["completed"]:
                 ended_at = timer["end_ts"]
                 started_at = timer["started_at"]
-                dur_min_done = max(1, int(round((ended_at - started_at).total_seconds()/60.0)))
+                dur_min_done = max(1, int(round((ended_at - started_at).total_seconds() / 60.0)))
                 sid = insert_session(
                     USER_ID, "W", int(dur_min_done), ended_at,
                     kind=timer["kind"], activity_type=timer["activity_type"], intensity=timer["intensity"],
@@ -522,10 +579,9 @@ with tab_timer:
                     goal_mode=("weekly" if timer["goal_id"] and (default_plan and default_plan.get("items")) else "custom"),
                     goal_id=timer["goal_id"], task=timer["task"], cat=timer["cat"],
                     alloc_bucket=timer["alloc_bucket"],
-                    break_autostart=(timer["kind"]!="activity" and timer["auto_break"]), skipped=False,
+                    break_autostart=(timer["kind"] != "activity" and timer["auto_break"]), skipped=False,
                     post_checkin=None, device="web-live"
                 )
-                # remember last session for post-check-in INSIDE Log a Session sections
                 st.session_state["pending_sid"] = sid
                 st.session_state["pending_kind"] = timer["kind"]
 
@@ -533,7 +589,7 @@ with tab_timer:
                 timer["running"] = False
                 st.success(f"Session saved. id={sid}")
 
-                # auto-break for focus only
+                # optional auto-break for focus
                 if timer["kind"] != "activity" and timer["auto_break"] and timer["break_min"] > 0:
                     timer.update({
                         "running": True, "completed": False,
