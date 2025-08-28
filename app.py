@@ -8,6 +8,7 @@ import pytz
 import pandas as pd
 import numpy as np
 import streamlit as st
+from streamlit.errors import StreamlitAPIException
 from pymongo import MongoClient
 import matplotlib.pyplot as plt
 
@@ -53,14 +54,27 @@ def pom_equiv(minutes: int) -> float:
 def pct(n, d) -> float:
     return (n / d * 100.0) if d else 0.0
 
-def safe_last_n_slider(label: str, available_count: int, default: int = 6, cap: int = 12, key: str = "lastn"):
+def choose_last_n(label: str, available_count: int, default: int = 6, cap: int = 12, key: str = "lastn"):
     """
-    Returns a valid slider value even when there are 0–1 items.
-    Caller should still guard when available_count == 0.
+    Returns an integer N in [1..min(cap, available_count)].
+    - If available_count == 0 -> returns 0 and shows a caption.
+    - If available_count == 1 -> returns 1 and shows a caption (no widget).
+    - Else uses a slider; falls back to number_input if slider raises.
     """
-    maxv = min(cap, max(1, int(available_count)))
+    if available_count <= 0:
+        st.caption(f"{label}: 0 (no weeks available)")
+        return 0
+    if available_count == 1:
+        st.caption(f"{label}: 1 (only one week available)")
+        return 1
+
+    maxv = min(cap, int(available_count))
     val = min(default, maxv)
-    return st.slider(label, 1, maxv, value=val, key=key)
+    try:
+        return st.slider(label, min_value=1, max_value=maxv, value=val, key=key)
+    except StreamlitAPIException:
+        st.warning("Slider fallback in use (using number input).")
+        return st.number_input(label, min_value=1, max_value=maxv, value=val, step=1, key=f"{key}_num")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Streamlit config
@@ -325,8 +339,8 @@ with tab_timer:
                     gid = it["goal_id"]
                     gtitle = goals_map.get(gid, {}).get("title", gid)
                     options.append((f"{gtitle} — planned {it['planned_current']} (backlog {it['backlog_in']})", gid, it["planned_current"]))
-                label = st.selectbox("Choose goal", options=[o[0] for o in options])
-                sel = next((o for o in options if o[0] == label), None)
+                label = st.selectbox("Choose goal", options=[o[0] for o in options]) if options else None
+                sel = next((o for o in options if o[0] == label), None) if label else None
                 if sel:
                     goal_id = sel[1]
                     goal_mode = "weekly"
@@ -663,7 +677,7 @@ with tab_planner:
             st.experimental_rerun()
 
 # =============================================================================
-# TAB 3: Analytics (safe slider + guards)
+# TAB 3: Analytics (safe chooser + guards)
 # =============================================================================
 with tab_analytics:
     st.header("📈 Analytics")
@@ -671,11 +685,12 @@ with tab_analytics:
     weeks_sessions = sorted(db.sessions.distinct("week_key", {"user": USER_ID, "t": "W"}))
     weeks_plans    = sorted(db.weekly_plans.distinct("week_key", {"user": USER_ID}))
     all_weeks      = sorted(set(weeks_sessions) | set(weeks_plans))
+    count_weeks    = len(all_weeks)
 
-    if len(all_weeks) == 0:
+    if count_weeks == 0:
         st.info("No data yet. Log some sessions or save a weekly plan to see analytics.")
     else:
-        last_n = safe_last_n_slider("Show last N weeks", available_count=len(all_weeks), default=6, cap=12, key="lastn_analytics")
+        last_n = choose_last_n("Show last N weeks", available_count=count_weeks, default=6, cap=12, key="lastn_analytics")
         weeks_view = all_weeks[-last_n:] if last_n > 0 else []
 
         if not weeks_view:
