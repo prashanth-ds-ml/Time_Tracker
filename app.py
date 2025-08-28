@@ -302,7 +302,7 @@ with tab_timer:
             if submitted:
                 upsert_daily_target(USER_ID, today, int(new_target))
                 st.success("Saved target.")
-                st.experimental_rerun()
+                st.rerun()
     with colT3:
         todays = list_today_sessions(USER_ID, today)
         focus_cnt = sum(1 for s in todays if s.get("t") == "W" and s.get("kind") != "activity")
@@ -400,11 +400,11 @@ with tab_timer:
         complete_early = colR.button("✅ Complete now", use_container_width=True)
 
         if refresh:
-            st.experimental_rerun()
+            st.rerun()
         if stop_now:
             timer["running"] = False
             st.warning("Timer canceled.")
-            st.experimental_rerun()
+            st.rerun()
         if complete_early:
             timer["end_ts"] = now_ist()
             remaining = 0
@@ -435,7 +435,7 @@ with tab_timer:
                     "started_at": now_ist(), "end_ts": now_ist() + timedelta(minutes=timer["break_min"])
                 })
                 st.info("Starting auto-break…")
-            st.experimental_rerun()
+            st.rerun()
 
     st.divider()
 
@@ -512,7 +512,7 @@ with tab_timer:
                     device="web"
                 )
                 st.success(f"Logged work. id={sid}")
-                st.experimental_rerun()
+                st.rerun()
     else:
         with st.form("break_form", clear_on_submit=True):
             dur_min = st.number_input("Duration (minutes)", min_value=1, max_value=60, value=dur_default, step=1)
@@ -534,7 +534,7 @@ with tab_timer:
                     post_checkin=None, device="web"
                 )
                 st.success(f"Logged break. id={sid}")
-                st.experimental_rerun()
+                st.rerun()
 
     st.divider()
     st.subheader("📝 Today’s Sessions")
@@ -556,7 +556,7 @@ with tab_timer:
         if st.button("↩️ Undo last entry", use_container_width=True):
             deleted = delete_last_today_session(USER_ID, today)
             st.warning(f"Deleted last session: {deleted}" if deleted else "Nothing to undo.")
-            st.experimental_rerun()
+            st.rerun()
 
 # =============================================================================
 # TAB 2: Weekly Planner — Plan builder FIRST, then Goal CRUD + progress
@@ -711,7 +711,7 @@ with tab_planner:
         cap = {"weekday": int(wkday), "weekend": int(wkend), "total": int(total_capacity)}
         upsert_week_plan(USER_ID, wk, wk_start_date.isoformat(), wk_end_date.isoformat(), cap, items)
         st.success(f"Plan saved for ISO week {wk}.")
-        st.experimental_rerun()
+        st.rerun()
 
     st.divider()
 
@@ -738,7 +738,7 @@ with tab_planner:
                 gid = create_goal(USER_ID, new_title, new_category, new_status, int(new_priority),
                                   [t.strip() for t in (new_tags or "").split(",") if t.strip()])
                 st.success(f"Goal created: {gid}")
-                st.experimental_rerun()
+                st.rerun()
 
     all_goals = get_goals(USER_ID)
     active_goals   = [g for g in all_goals if (g.get("status") == "In Progress")]
@@ -790,7 +790,7 @@ with tab_planner:
         if st.button("Save", key=f"save_{gid}"):
             update_goal(gid, {"title": etitle, "status": estatus, "category": ecat, "priority": int(eprio)})
             st.success("Updated.")
-            st.experimental_rerun()
+            st.rerun()
 
     with st.expander("⏸️ On Hold", expanded=False):
         for g in onhold_goals:
@@ -808,7 +808,7 @@ with tab_planner:
                 if st.button("Save", key=f"hold_save_{g['_id']}"):
                     update_goal(g["_id"], {"title": etitle, "category": ecat, "priority": int(eprio)})
                     st.success("Updated.")
-                    st.experimental_rerun()
+                    st.rerun()
 
     with st.expander("✅ Completed", expanded=False):
         for g in completed_goals:
