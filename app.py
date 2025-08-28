@@ -8,7 +8,7 @@ import pytz
 
 # --- Config ---
 IST = pytz.timezone("Asia/Kolkata")
-MONGO_URI = os.environ.get("MONGO_URI", "")
+MONGO_URI = os.environ.get("mongo_uri", "")
 DB_NAME   = os.environ.get("DB_NAME", "Focus_DB")
 USER_ID   = os.environ.get("USER_ID", "prashanth")
 
