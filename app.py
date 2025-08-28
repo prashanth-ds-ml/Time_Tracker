@@ -13,6 +13,23 @@ from streamlit.errors import StreamlitAPIException
 from pymongo import MongoClient
 import matplotlib.pyplot as plt
 
+import time  # NEW
+
+# Timer-finish sound (your URL)
+FINISH_SOUND_URL = "https://github.com/prashanth-ds-ml/Time_Tracker/raw/refs/heads/main/one_piece_overtake.mp3"
+
+def play_finish_sound():
+    """Autoplay a sound once. Works in browsers after a user interaction (starting the timer counts)."""
+    st.markdown(
+        f"""
+        <audio autoplay>
+          <source src="{FINISH_SOUND_URL}" type="audio/mpeg">
+        </audio>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 # ─ Live refresh helper (best-effort) ─
 def live_autorefresh(active: bool, key: str = "live_tick") -> bool:
     """
@@ -366,6 +383,11 @@ tab_timer, tab_planner, tab_analytics = st.tabs(["⏱️ Timer & Log", "🗂️ 
 # =============================================================================
 # TAB 1: Timer & Log
 # =============================================================================
+# If we flagged a beep on the previous tick, play it now and clear the flag.
+if st.session_state.get("beep_once"):
+    play_finish_sound()
+    st.session_state["beep_once"] = False
+
 with tab_timer:
     st.header("⏱️ Focus Timer")
     st.caption(f"IST Date: **{today}** • ISO Week: **{default_week_key}**")
@@ -506,11 +528,7 @@ with tab_timer:
             })
 
         # Countdown
-                # Countdown
         if timer["running"]:
-            # try to auto-refresh every second; show if it’s on
-            auto_on = live_autorefresh(True, key="timer_live_tick")
-
             total_secs = max(int(timer["dur_min"]) * 60, 1)
             remaining_secs = max(int((timer["end_ts"] - now_ist()).total_seconds()), 0)
             elapsed_secs = total_secs - remaining_secs
@@ -528,7 +546,7 @@ with tab_timer:
                 <div style="font-size:1.2rem;margin-bottom:0.25rem;">
                   ⏳ <b>{tlabel}</b> — {timer['dur_min']} min
                 </div>
-                <div style="font-size:2.4rem;font-weight:700;letter-spacing:1px;">
+                <div style="font-size:2.6rem;font-weight:700;letter-spacing:1px;">
                   {rem_m:02d}:{rem_s:02d}
                 </div>
                 """,
@@ -545,33 +563,30 @@ with tab_timer:
             with meta2:
                 st.caption(f"Ends: **{ends_lbl}**")
             with meta3:
-                tick = now_ist().strftime("%H:%M:%S")
-                st.caption(("Auto-refresh: **ON** • " if auto_on else "Auto-refresh: **OFF** • ") + f"Last tick: **{tick}**")
+                st.caption(f"Last tick: **{now_ist().strftime('%H:%M:%S')}**")
 
-            # Controls
+            # Controls (processed on next tick — i.e., within 1s)
             colL, colM, colR = st.columns(3)
-            stop_now = colL.button("⏹️ Stop / Cancel", use_container_width=True)
-            if not auto_on:
-                refresh = colM.button("🔄 Update timer", use_container_width=True)
-            else:
-                refresh = False
-            complete_early = colR.button("✅ Complete now", use_container_width=True)
+            stop_now = colL.button("⏹️ Stop / Cancel", use_container_width=True, key="btn_stop_live")
+            refresh  = colM.button("🔄 Update now", use_container_width=True, key="btn_refresh_live")
+            complete_early = colR.button("✅ Complete now", use_container_width=True, key="btn_complete_live")
 
-            if refresh:
-                st.rerun()
+            # Button intents
             if stop_now:
                 timer["running"] = False
                 st.warning("Timer canceled.")
                 st.rerun()
-            if complete_early:
-                timer["end_ts"] = now_ist()
-                remaining_secs = 0
 
-            # When time is up, finalize this session
+            if complete_early:
+                # force to now
+                timer["end_ts"] = now_ist()
+                remaining_secs = 0  # handled below
+
             if remaining_secs <= 0 and not timer["completed"]:
                 ended_at = timer["end_ts"]
                 started_at = timer["started_at"]
                 dur_min_done = max(1, int(round((ended_at - started_at).total_seconds() / 60.0)))
+
                 sid = insert_session(
                     USER_ID, "W", int(dur_min_done), ended_at,
                     kind=timer["kind"], activity_type=timer["activity_type"], intensity=timer["intensity"],
@@ -582,6 +597,10 @@ with tab_timer:
                     break_autostart=(timer["kind"] != "activity" and timer["auto_break"]), skipped=False,
                     post_checkin=None, device="web-live"
                 )
+
+                # Play finish sound once on the *next* render (avoids double-play on rerun)
+                st.session_state["beep_once"] = True
+
                 st.session_state["pending_sid"] = sid
                 st.session_state["pending_kind"] = timer["kind"]
 
@@ -589,7 +608,7 @@ with tab_timer:
                 timer["running"] = False
                 st.success(f"Session saved. id={sid}")
 
-                # optional auto-break for focus
+                # Optional auto-break for focus
                 if timer["kind"] != "activity" and timer["auto_break"] and timer["break_min"] > 0:
                     timer.update({
                         "running": True, "completed": False,
@@ -601,6 +620,15 @@ with tab_timer:
                     })
                     st.info("Starting auto-break…")
                 st.rerun()
+
+            # Manual refresh (optional)
+            if refresh:
+                st.rerun()
+
+            # Native continuous tick: wait ~1s then rerun to animate the countdown
+            time.sleep(1)
+            st.rerun()
+
 
     st.divider()
 
