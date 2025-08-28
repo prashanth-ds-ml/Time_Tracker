@@ -305,7 +305,7 @@ with tab_timer:
             if submitted:
                 upsert_daily_target(USER_ID, today, int(new_target))
                 st.success("Saved target.")
-                st.experimental_rerun()
+                st.rerun()
     with colT3:
         todays = list_today_sessions(USER_ID, today)
         focus_cnt = sum(1 for s in todays if s.get("t") == "W" and s.get("kind") != "activity")
@@ -402,11 +402,11 @@ with tab_timer:
         complete_early = colR.button("✅ Complete now", use_container_width=True)
 
         if refresh:
-            st.experimental_rerun()
+            st.rerun()
         if stop_now:
             timer["running"] = False
             st.warning("Timer canceled.")
-            st.experimental_rerun()
+            st.rerun()
         if complete_early:
             timer["end_ts"] = now_ist()
             remaining = 0
@@ -441,7 +441,7 @@ with tab_timer:
                     "started_at": now_ist(), "end_ts": now_ist() + timedelta(minutes=timer["break_min"])
                 })
                 st.info("Starting auto-break…")
-            st.experimental_rerun()
+            st.rerun()
 
     # Post-checkin for the last completed session
     if sid := st.session_state.get("last_session_id"):
@@ -524,7 +524,7 @@ with tab_timer:
                     device="web"
                 )
                 st.success(f"Logged work. id={sid}")
-                st.experimental_rerun()
+                st.rerun()
 
         else:
             # Activity (custom timer)
@@ -558,7 +558,7 @@ with tab_timer:
                     device="web"
                 )
                 st.success(f"Logged activity. id={sid}")
-                st.experimental_rerun()
+                st.rerun()
 
     st.divider()
     st.subheader("📝 Today’s Sessions")
@@ -580,7 +580,7 @@ with tab_timer:
         if st.button("↩️ Undo last entry", use_container_width=True):
             deleted = delete_last_today_session(USER_ID, today)
             st.warning(f"Deleted last session: {deleted}" if deleted else "Nothing to undo.")
-            st.experimental_rerun()
+            st.rerun()
 
 # =============================================================================
 # TAB 2: Weekly Planner
@@ -712,7 +712,7 @@ with tab_planner:
         cap = {"weekday": int(wkday), "weekend": int(wkend), "total": int(total_capacity)}
         upsert_week_plan(USER_ID, wk, wk_start_date.isoformat(), wk_end_date.isoformat(), cap, items)
         st.success(f"Plan saved for ISO week {wk}.")
-        st.experimental_rerun()
+        st.rerun()
 
     st.divider()
 
@@ -780,7 +780,7 @@ with tab_planner:
                         {"$set": {"items": new_items, "updated_at": datetime.now(timezone.utc)}}
                     )
                     st.success("Rollover applied to current plan.")
-                    st.experimental_rerun()
+                    st.rerun()
                 else:
                     st.info("Rollover computed — no changes needed.")
 
@@ -809,7 +809,7 @@ with tab_planner:
                 gid = create_goal(USER_ID, new_title, new_category, new_status, int(new_priority),
                                   [t.strip() for t in (new_tags or "").split(",") if t.strip()])
                 st.success(f"Goal created: {gid}")
-                st.experimental_rerun()
+                st.rerun()
 
     all_goals = get_goals(USER_ID)
     active_goals   = [g for g in all_goals if (g.get("status") == "In Progress")]
@@ -858,11 +858,11 @@ with tab_planner:
             if st.button("Save", key=f"save_{gid}"):
                 update_goal(gid, {"title": etitle, "status": estatus, "category": ecat, "priority": int(eprio)})
                 st.success("Updated.")
-                st.experimental_rerun()
+                st.rerun()
             if del_click:
                 if delete_goal(gid):
                     st.warning("Goal deleted.")
-                    st.experimental_rerun()
+                    st.rerun()
                 else:
                     st.error("This goal has sessions; delete is blocked. Mark it On Hold/Completed instead.")
 
@@ -885,11 +885,11 @@ with tab_planner:
                 if st.button("Save", key=f"hold_save_{g['_id']}"):
                     update_goal(g["_id"], {"title": etitle, "category": ecat, "priority": int(eprio)})
                     st.success("Updated.")
-                    st.experimental_rerun()
+                    st.rerun()
                 if del_click:
                     if delete_goal(g["_id"]):
                         st.warning("Goal deleted.")
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.error("This goal has sessions; delete is blocked.")
 
@@ -901,7 +901,7 @@ with tab_planner:
                 if st.button("🗑️ Delete", key=f"done_del_{g['_id']}", disabled=not can_delete):
                     if delete_goal(g["_id"]):
                         st.warning("Goal deleted.")
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.error("This goal has sessions; delete is blocked.")
 
