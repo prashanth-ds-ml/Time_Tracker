@@ -24,7 +24,7 @@ def live_autorefresh(active: bool, key: str = "live_tick") -> bool:
     try:
         # optional dependency: pip install streamlit-autorefresh
         from streamlit_autorefresh import st_autorefresh
-        st_autorefresh(interval=1000, limit=None, key=key)
+        st_autorefresh(interval=30, limit=None, key=key)
         return True
     except Exception:
         return False
