@@ -8,4 +8,3 @@ matplotlib
 numpy
 pandas
 python-dotenv
-streamlit-autorefresh
