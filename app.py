@@ -527,7 +527,7 @@ with tab_timer:
             done_total = sum(r["Done Current (pe)"] + r["Done Backlog (pe)"] for r in rows)
             st.progress(min(done_total / max(planned_total, 1), 1.0), text=f"Adherence: {done_total:.1f} / {planned_total} pe")
 
-    # LEFT: Live Timer (Work focus or Activity)
+    # LEFT: Live Timer (radio OUTSIDE any form)
     with left:
         st.subheader("⏳ Live Timer")
 
@@ -539,23 +539,19 @@ with tab_timer:
                 "deep_work": True, "goal_id": None, "task": None, "cat": None,
                 "alloc_bucket": None, "auto_break": True, "break_min": 5
             }
-
         timer = st.session_state.timer
 
-        with st.form("live_timer_form", clear_on_submit=False):
-            # SIMPLE radio: fewer surprises
-            live_type = st.radio("Type", ["Work (focus)", "Activity"], index=(0 if timer.get("kind","focus")=="focus" else 1), horizontal=True)
+        # This re-renders instantly when changed
+        default_idx = 0 if timer.get("kind", "focus") == "focus" else 1
+        live_type = st.radio("Type", ["Work (focus)", "Activity"], index=default_idx, horizontal=True, key="live_type_choice")
 
-            kind = "focus" if live_type == "Work (focus)" else "activity"
-            goal_id = None
-            alloc_bucket = None
-            task_text = None
-            cat = None
-            activity_type = None
+        # Focus form
+        if live_type == "Work (focus)":
+            with st.form("focus_live_form", clear_on_submit=False):
+                dur_live = st.number_input("Work duration (minutes)", min_value=5, max_value=120,
+                                           value=timer.get("dur_min", 25), step=1, key="live_focus_dur")
+                deep_live = (dur_live >= 23)
 
-            if kind == "focus":
-                dur_live = st.number_input("Work duration (minutes)", min_value=5, max_value=120, value=timer.get("dur_min",25), step=1, key="live_focus_dur")
-                deep_live = True if dur_live >= 23 else False
                 labels = []
                 choices = []
                 plan_src = default_plan or {}
@@ -576,36 +572,59 @@ with tab_timer:
                     alloc_bucket = determine_alloc_bucket(USER_ID, default_week_key, goal_id, planned_current) if planned_current > 0 else None
                     cat = goals_map.get(goal_id, {}).get("category")
                 else:
+                    goal_id = None
+                    alloc_bucket = None
+                    cat = None
                     st.info("No active goals found. Create a goal in Weekly Planner.")
+
                 task_text = st.text_input("Optional task note", key="live_task_note")
-            else:
-                # Activity: **custom duration + type**, no intensity here
-                dur_live = st.number_input("Activity duration (minutes)", min_value=1, max_value=180, value=10, step=1, key="live_act_dur")
+
+                auto_break = st.checkbox("Auto-break after Work", value=True, key="live_ab")
+                break_min = st.number_input("Break length (min)", 1, 30, value=5, key="live_break_min")
+
+                start_focus = st.form_submit_button("▶️ Start Focus Timer", use_container_width=True)
+
+            if start_focus and not timer["running"]:
+                timer.update({
+                    "running": True, "completed": False, "dur_min": int(dur_live),
+                    "t": "W",
+                    "kind": "focus",
+                    "activity_type": None,
+                    "intensity": None,
+                    "deep_work": (dur_live >= 23),
+                    "goal_id": goal_id,
+                    "task": task_text, "cat": cat,
+                    "alloc_bucket": (alloc_bucket if goal_id else None),
+                    "auto_break": bool(auto_break), "break_min": int(break_min),
+                    "started_at": now_ist(), "end_ts": now_ist() + timedelta(minutes=int(dur_live))
+                })
+                st.rerun()
+
+        # Activity form
+        else:
+            with st.form("activity_live_form", clear_on_submit=False):
+                dur_live = st.number_input("Activity duration (minutes)", min_value=1, max_value=180,
+                                           value=10, step=1, key="live_act_dur")
                 activity_type = st.selectbox("Activity type", ["exercise","meditation","breathing","other"], index=1, key="live_act_type")
-                deep_live = None
-                cat = "Wellbeing"
-                task_text = st.text_input("Optional activity note", key="live_act_note")
+                note_text = st.text_input("Optional activity note", key="live_act_note")
 
-            auto_break = st.checkbox("Auto-break after Work", value=True)
-            break_min = st.number_input("Break length (min)", 1, 30, value=5)
+                start_activity = st.form_submit_button("▶️ Start Activity Timer", use_container_width=True)
 
-            start_live = st.form_submit_button("▶️ Start Timer", use_container_width=True)
-
-        if start_live and not timer["running"]:
-            timer.update({
-                "running": True, "completed": False, "dur_min": int(dur_live),
-                "t": "W",
-                "kind": kind,
-                "activity_type": (activity_type if kind == "activity" else None),
-                "intensity": None,  # no intensity in live timer
-                "deep_work": (dur_live >= 23) if kind != "activity" else None,
-                "goal_id": (goal_id if kind == "focus" else None),
-                "task": task_text, "cat": cat,
-                "alloc_bucket": (alloc_bucket if kind == "focus" else None),
-                "auto_break": bool(auto_break), "break_min": int(break_min),
-                "started_at": now_ist(), "end_ts": now_ist() + timedelta(minutes=int(dur_live))
-            })
-            st.rerun()  # show countdown immediately
+            if start_activity and not timer["running"]:
+                timer.update({
+                    "running": True, "completed": False, "dur_min": int(dur_live),
+                    "t": "W",
+                    "kind": "activity",
+                    "activity_type": activity_type,
+                    "intensity": None,
+                    "deep_work": None,
+                    "goal_id": None,
+                    "task": note_text, "cat": "Wellbeing",
+                    "alloc_bucket": None,
+                    "auto_break": False, "break_min": 0,
+                    "started_at": now_ist(), "end_ts": now_ist() + timedelta(minutes=int(dur_live))
+                })
+                st.rerun()
 
         # Countdown / running
         if timer["running"]:
@@ -846,7 +865,6 @@ with tab_timer:
         def fmt_row(s):
             kindlab = "Work" if s.get("t") == "W" else "Break"
             if s.get("kind") == "activity": kindlab = "Activity"
-            # Safe time display:
             when = to_ist_display(s.get("started_at_ist")).strftime("%H:%M")
             goal_title = goals_map.get(s.get("goal_id"), {}).get("title") if s.get("goal_id") else (s.get("task") or "—")
             return {
