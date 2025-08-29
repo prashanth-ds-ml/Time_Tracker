@@ -74,6 +74,7 @@ def pct(n, d) -> float:
     return (n / d * 100.0) if d else 0.0
 
 def choose_last_n(label: str, available_count: int, default: int = 6, cap: int = 12, key: str = "lastn"):
+    """Slider with safe fallback when Streamlit complains about bounds/state."""
     if available_count <= 0:
         st.caption(f"{label}: 0")
         return 0
@@ -88,7 +89,7 @@ def choose_last_n(label: str, available_count: int, default: int = 6, cap: int =
         st.warning("Slider fallback in use.")
         return st.number_input(label, min_value=1, max_value=maxv, value=val, step=1, key=f"{key}_num")
 
-# Optional-field pruning & bucket normalization  ───────────────────────────────
+# Optional-field pruning & bucket normalization
 def _prune_nones(doc: dict):
     for k in list(doc.keys()):
         if doc[k] is None:
@@ -479,7 +480,7 @@ with tab_timer:
             done_total = sum(r["Done Current (pe)"] + r["Done Backlog (pe)"] for r in rows)
             st.progress(min(done_total / max(planned_total, 1), 1.0), text=f"Adherence: {done_total:.1f} / {planned_total} pe")
 
-    # ── LEFT: Live Timer
+    # ── LEFT: Live Timer (reactive; no form)
     with left:
         st.subheader("⏳ Live Timer")
 
@@ -492,77 +493,76 @@ with tab_timer:
             }
         timer = st.session_state.timer
 
+        # Type selector (reactive)
         def pick_timer_type() -> str:
-            # Prefer segmented control if available; fall back to radio
             try:
-                return st.segmented_control("Type", ["Work (focus)", "Activity"], default="Work (focus)")
+                return st.segmented_control("Type", ["Work (focus)", "Activity"], default="Work (focus)", key="live_type")
             except Exception:
-                return st.radio("Type", ["Work (focus)", "Activity"], index=0, horizontal=True)
+                return st.radio("Type", ["Work (focus)", "Activity"], index=0, horizontal=True, key="live_type")
 
-        with st.form("live_timer_form", clear_on_submit=False):
-            live_type = pick_timer_type()
+        live_type = pick_timer_type()
 
-            # Defaults
-            kind = "focus"; activity_type=None; deep_live=True
-            goal_id=None; alloc_bucket=None; task_text=None; cat=None
+        # Work (focus) inputs
+        if live_type == "Work (focus)":
+            dur_live = st.number_input("Work duration (minutes)", min_value=5, max_value=120, value=25, step=1, key="live_focus_dur")
+            deep_live = dur_live >= 23
 
-            if live_type == "Work (focus)":
-                dur_live = st.number_input("Work duration (minutes)", min_value=5, max_value=120, value=25, step=1, key="live_focus_dur")
-                deep_live = dur_live >= 23
-
-                labels, choices = [], []
-                plan_src = default_plan or {}
-                items_for_pick = plan_src.get("items", [])
-                if items_for_pick:
-                    st.caption("Current week's goals:")
-                    for it in sorted(items_for_pick, key=lambda x: x.get("priority_rank", 99)):
-                        gid = it["goal_id"]; g = goals_map.get(gid, {})
-                        title = g.get("title", gid); gcat = g.get("category","—")
-                        planned = int(it.get("planned_current",0))
-                        cur_pe = sum_pe_for(USER_ID, default_week_key, gid, "current")
-                        rem_cur = max(planned - cur_pe, 0)
-                        label = f"[P{it.get('priority_rank')}] {title} · {gcat} • current {rem_cur}/{planned} • backlog {it.get('backlog_in',0)}"
-                        labels.append(label); choices.append((gid, planned))
-                else:
-                    st.info("No active goals found. Create a goal in Weekly Planner.")
-
-                if labels:
-                    sel_label = st.radio("Pick goal", labels, index=0, key="live_pick_goal")
-                    idx = labels.index(sel_label)
-                    goal_id, planned_current = choices[idx]
-                    alloc_bucket = determine_alloc_bucket(USER_ID, default_week_key, goal_id, planned_current) if planned_current > 0 else None
-                    cat = goals_map.get(goal_id, {}).get("category")
-                task_text = st.text_input("Optional task note", key="live_task_note")
-
-                # Auto-break controls only for Work
-                auto_break = st.checkbox("Auto-break after Work", value=True)
-                break_min = st.number_input("Break length (min)", 1, 30, value=5)
-
+            labels, choices = [], []
+            plan_src = default_plan or {}
+            items_for_pick = plan_src.get("items", [])
+            if items_for_pick:
+                st.caption("Current week's goals:")
+                for it in sorted(items_for_pick, key=lambda x: x.get("priority_rank", 99)):
+                    gid = it["goal_id"]; g = goals_map.get(gid, {})
+                    title = g.get("title", gid); gcat = g.get("category","—")
+                    planned = int(it.get("planned_current",0))
+                    cur_pe = sum_pe_for(USER_ID, default_week_key, gid, "current")
+                    rem_cur = max(planned - cur_pe, 0)
+                    label = f"[P{it.get('priority_rank')}] {title} · {gcat} • current {rem_cur}/{planned} • backlog {it.get('backlog_in',0)}"
+                    labels.append(label); choices.append((gid, planned))
             else:
-                # Activity in Live Timer — custom duration + type (no intensity here)
-                kind = "activity"; deep_live=None
-                dur_live = st.number_input("Activity duration (minutes)", min_value=1, max_value=180, value=10, step=1, key="live_act_dur")
-                activity_type = st.selectbox("Activity type", ["exercise","meditation","breathing","other"], index=1, key="live_act_type")
-                task_text = st.text_input("Optional activity note", key="live_act_note")
-                cat = "Wellbeing"
-                # No auto-break UI for activities
-                auto_break = False
-                break_min = 0
+                st.info("No active goals found. Create a goal in Weekly Planner.")
 
-            start_live = st.form_submit_button("▶️ Start Timer", use_container_width=True)
+            goal_id=None; planned_current=0; alloc_bucket=None; cat=None
+            if labels:
+                sel_label = st.radio("Pick goal", labels, index=0, key="live_pick_goal")
+                idx = labels.index(sel_label)
+                goal_id, planned_current = choices[idx]
+                alloc_bucket = determine_alloc_bucket(USER_ID, default_week_key, goal_id, planned_current) if planned_current > 0 else None
+                cat = goals_map.get(goal_id, {}).get("category")
+            task_text = st.text_input("Optional task note", key="live_task_note")
 
-        if start_live and not timer["running"]:
-            timer.update({
-                "running": True, "completed": False, "dur_min": int(dur_live),
-                "t": "W" if kind != "break" else "B",
-                "kind": kind, "activity_type": activity_type,
-                "deep_work": (dur_live >= 23) if kind == "focus" else None,
-                "goal_id": goal_id, "task": task_text, "cat": cat, "alloc_bucket": alloc_bucket,
-                "auto_break": bool(auto_break), "break_min": int(break_min),
-                "started_at": now_ist(), "end_ts": now_ist() + timedelta(minutes=int(dur_live))
-            })
+            # Auto-break controls only for Work
+            auto_break = st.checkbox("Auto-break after Work", value=True, key="live_auto_break")
+            break_min = st.number_input("Break length (min)", 1, 30, value=5, key="live_break_min")
 
-        # Countdown
+            start_live = st.button("▶️ Start Timer", use_container_width=True, key="btn_start_live_work")
+            if start_live and not timer["running"]:
+                timer.update({
+                    "running": True, "completed": False, "dur_min": int(dur_live),
+                    "t": "W", "kind": "focus", "activity_type": None,
+                    "deep_work": deep_live,
+                    "goal_id": goal_id, "task": task_text, "cat": cat, "alloc_bucket": alloc_bucket,
+                    "auto_break": bool(auto_break), "break_min": int(break_min),
+                    "started_at": now_ist(), "end_ts": now_ist() + timedelta(minutes=int(dur_live))
+                })
+
+        # Activity inputs (custom duration + type; no intensity)
+        else:
+            dur_live = st.number_input("Activity duration (minutes)", min_value=1, max_value=180, value=10, step=1, key="live_act_dur")
+            activity_type = st.selectbox("Activity type", ["exercise","meditation","breathing","other"], index=1, key="live_act_type")
+            task_text = st.text_input("Optional activity note", key="live_act_note")
+            start_live = st.button("▶️ Start Activity", use_container_width=True, key="btn_start_live_act")
+            if start_live and not timer["running"]:
+                timer.update({
+                    "running": True, "completed": False, "dur_min": int(dur_live),
+                    "t": "W", "kind": "activity", "activity_type": activity_type,
+                    "deep_work": None, "goal_id": None, "task": task_text, "cat": "Wellbeing",
+                    "alloc_bucket": None, "auto_break": False, "break_min": 0,
+                    "started_at": now_ist(), "end_ts": now_ist() + timedelta(minutes=int(dur_live))
+                })
+
+        # Countdown & controls
         if timer["running"]:
             total_secs = max(int(timer["dur_min"]) * 60, 1)
             remaining_secs = max(int((timer["end_ts"] - now_ist()).total_seconds()), 0)
@@ -959,7 +959,7 @@ with tab_planner:
 
     st.divider()
 
-    # Current week table with progress + rollover
+    # Current week table + rollover
     st.subheader("📊 Current Week Allocation")
     plan_cur = get_week_plan(USER_ID, wk)
     if not plan_cur:
