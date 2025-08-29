@@ -53,6 +53,14 @@ def _to_utc_naive(dt: datetime) -> datetime:
         dt = IST.localize(dt)
     return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
+def to_ist_display(dt: Optional[datetime]) -> datetime:
+    """Make any Mongo datetime (usually UTC-naive) safely IST-aware for display."""
+    if not isinstance(dt, datetime):
+        return now_ist()
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(IST)
+
 def week_key_from_datestr(datestr: str) -> str:
     y, m, d = map(int, datestr.split("-"))
     dt = datetime(y, m, d)
@@ -226,7 +234,7 @@ def determine_alloc_bucket(uid: str, week_key: str, goal_id: str, planned_curren
     done_current_pe = sum_pe_for(uid, week_key, goal_id, "current")
     return "current" if done_current_pe + 1e-6 < float(planned_current) else "backlog"
 
-# ── Hardened insert_session: always satisfies your validators
+# ── Hardened insert_session
 def insert_session(
     user_id: str,
     t: str,                 # "W" or "B"
@@ -235,7 +243,7 @@ def insert_session(
     *,
     kind: Optional[str] = None,               # "focus" or "activity" (for W)
     activity_type: Optional[str] = None,      # exercise/meditation/breathing/other
-    intensity: Optional[str] = None,          # kept for manual log
+    intensity: Optional[str] = None,          # only used in manual log
     deep_work: Optional[bool] = None,
     goal_mode: Optional[str] = None,          # "weekly" or "custom"
     goal_id: Optional[str] = None,
@@ -247,7 +255,6 @@ def insert_session(
     post_checkin: Optional[Dict[str, Any]] = None,
     device: Optional[str] = "web"
 ) -> str:
-    # normalize core
     t = "B" if str(t).upper() == "B" else "W"
     dur_min = max(1, int(dur_min))
     pe = pom_equiv(dur_min)
@@ -262,7 +269,6 @@ def insert_session(
     date_ist = started_at_ist.astimezone(IST).date().isoformat()
     week_key = week_key_from_datestr(date_ist)
 
-    # normalize enums & combos
     kind = (kind or None)
     if kind is not None:
         kind = str(kind).strip().lower()
@@ -291,7 +297,6 @@ def insert_session(
         goal_mode = ("custom" if (kind == "focus" and t == "W" and not goal_id) else goal_mode)
         alloc_bucket = None
 
-    # safe post_checkin
     safe_pc = None
     if isinstance(post_checkin, dict):
         pc = {}
@@ -339,7 +344,6 @@ def insert_session(
         "created_at": now,
         "updated_at": now,
     }
-    # prune Nones
     doc = {k: v for k, v in doc.items() if v is not None}
 
     try:
@@ -539,11 +543,8 @@ with tab_timer:
         timer = st.session_state.timer
 
         with st.form("live_timer_form", clear_on_submit=False):
-            # Prefer segmented control, fall back to radio on older Streamlit
-            try:
-                live_type = st.segmented_control("Type", ["Work (focus)", "Activity"], default="Work (focus)")
-            except Exception:
-                live_type = st.radio("Type", ["Work (focus)", "Activity"], index=0, horizontal=True)
+            # SIMPLE radio: fewer surprises
+            live_type = st.radio("Type", ["Work (focus)", "Activity"], index=(0 if timer.get("kind","focus")=="focus" else 1), horizontal=True)
 
             kind = "focus" if live_type == "Work (focus)" else "activity"
             goal_id = None
@@ -551,11 +552,10 @@ with tab_timer:
             task_text = None
             cat = None
             activity_type = None
-            # Live duration + inputs
+
             if kind == "focus":
-                dur_live = st.number_input("Work duration (minutes)", min_value=5, max_value=120, value=25, step=1, key="live_focus_dur")
+                dur_live = st.number_input("Work duration (minutes)", min_value=5, max_value=120, value=timer.get("dur_min",25), step=1, key="live_focus_dur")
                 deep_live = True if dur_live >= 23 else False
-                # show goals from plan (or derived)
                 labels = []
                 choices = []
                 plan_src = default_plan or {}
@@ -579,11 +579,11 @@ with tab_timer:
                     st.info("No active goals found. Create a goal in Weekly Planner.")
                 task_text = st.text_input("Optional task note", key="live_task_note")
             else:
-                # Activity: custom duration + type; no intensity here (kept in manual log section)
+                # Activity: **custom duration + type**, no intensity here
                 dur_live = st.number_input("Activity duration (minutes)", min_value=1, max_value=180, value=10, step=1, key="live_act_dur")
                 activity_type = st.selectbox("Activity type", ["exercise","meditation","breathing","other"], index=1, key="live_act_type")
                 deep_live = None
-                cat = "Wellbeing"  # default category for activity
+                cat = "Wellbeing"
                 task_text = st.text_input("Optional activity note", key="live_act_note")
 
             auto_break = st.checkbox("Auto-break after Work", value=True)
@@ -605,6 +605,7 @@ with tab_timer:
                 "auto_break": bool(auto_break), "break_min": int(break_min),
                 "started_at": now_ist(), "end_ts": now_ist() + timedelta(minutes=int(dur_live))
             })
+            st.rerun()  # show countdown immediately
 
         # Countdown / running
         if timer["running"]:
@@ -657,7 +658,6 @@ with tab_timer:
                 started_at = timer["started_at"]
                 dur_min_done = max(1, int(round((ended_at - started_at).total_seconds() / 60.0)))
 
-                # SAFE call: activity never passes goal fields; focus weekly/custom handled
                 sid = insert_session(
                     USER_ID, timer["t"], int(dur_min_done), ended_at,
                     kind=("focus" if timer["kind"] == "focus" and timer["t"] == "W" else
@@ -846,9 +846,11 @@ with tab_timer:
         def fmt_row(s):
             kindlab = "Work" if s.get("t") == "W" else "Break"
             if s.get("kind") == "activity": kindlab = "Activity"
+            # Safe time display:
+            when = to_ist_display(s.get("started_at_ist")).strftime("%H:%M")
             goal_title = goals_map.get(s.get("goal_id"), {}).get("title") if s.get("goal_id") else (s.get("task") or "—")
             return {
-                "When (IST)": s.get("started_at_ist").astimezone(IST).strftime("%H:%M"),
+                "When (IST)": when,
                 "Type": kindlab, "Dur (min)": s.get("dur_min"), "PE": s.get("pom_equiv"),
                 "Goal/Task": goal_title, "Bucket": s.get("alloc_bucket") or "—",
                 "Deep": "✓" if s.get("deep_work") else "—",
