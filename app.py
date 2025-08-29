@@ -156,7 +156,7 @@ def get_goals_map(uid: str) -> Dict[str, Dict[str, Any]]:
 def create_goal(user_id: str, title: str, category: str, status: str = "In Progress",
                 priority: int = 3, tags: Optional[List[str]] = None) -> str:
     gid = uuid.uuid4().hex[:12]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     doc = {
         "_id": gid, "user": user_id, "title": title.strip(),
         "category": category.strip() or "Other",
@@ -170,7 +170,7 @@ def create_goal(user_id: str, title: str, category: str, status: str = "In Progr
     return gid
 
 def update_goal(goal_id: str, updates: Dict[str, Any]):
-    updates["updated_at"] = datetime.now(timezone.utc)
+    updates["updated_at"] = datetime.now(timezone.utc).replace(tzinfo=None)
     db.goals.update_one({"_id": goal_id, "user": USER_ID}, {"$set": updates})
 
 def delete_goal(goal_id: str) -> bool:
@@ -187,7 +187,7 @@ def get_week_plan(uid: str, week_key: str) -> Optional[Dict[str, Any]]:
 def upsert_week_plan(uid: str, week_key: str, week_start: str, week_end: str,
                      capacity: Dict[str, int], items: List[Dict[str, Any]]):
     _id = f"{uid}|{week_key}"
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     db.weekly_plans.update_one(
         {"_id": _id},
         {"$setOnInsert": {"_id": _id, "user": uid, "created_at": now, "schema_version": 1},
@@ -198,7 +198,7 @@ def upsert_week_plan(uid: str, week_key: str, week_start: str, week_end: str,
 
 def upsert_daily_target(uid: str, date_ist: str, target_pomos: int, target_minutes: Optional[int] = None):
     _id = f"{uid}|{date_ist}"
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     db.daily_targets.update_one(
         {"_id": _id},
         {"$setOnInsert": {"_id": _id, "user": uid, "date_ist": date_ist, "created_at": now, "schema_version": 1},
@@ -234,7 +234,7 @@ def determine_alloc_bucket(uid: str, week_key: str, goal_id: str, planned_curren
     done_current_pe = sum_pe_for(uid, week_key, goal_id, "current")
     return "current" if done_current_pe + 1e-6 < float(planned_current) else "backlog"
 
-# ── Hardened insert_session
+# ── Hardened insert_session (fixes 'updated_at' conflict)
 def insert_session(
     user_id: str,
     t: str,                 # "W" or "B"
@@ -316,7 +316,8 @@ def insert_session(
     sid = f"{user_id}|{date_ist}|{t}|{int(started_at_ist.timestamp())}|{dur_min}"
     now = datetime.now(timezone.utc).replace(tzinfo=None)
 
-    doc = {
+    # Build full doc then split so updated_at is NOT in $setOnInsert (avoids conflict)
+    full_doc = {
         "_id": sid,
         "user": user_id,
         "date_ist": date_ist,
@@ -344,19 +345,29 @@ def insert_session(
         "created_at": now,
         "updated_at": now,
     }
-    doc = {k: v for k, v in doc.items() if v is not None}
+    # Strip Nones for cleanliness
+    full_doc = {k: v for k, v in full_doc.items() if v is not None}
+
+    # Split doc: $setOnInsert gets everything EXCEPT 'updated_at'
+    doc_on_insert = dict(full_doc)
+    doc_on_insert.pop("updated_at", None)
 
     try:
-        db.sessions.update_one({"_id": sid},
-                               {"$setOnInsert": doc, "$set": {"updated_at": now}},
-                               upsert=True)
+        db.sessions.update_one(
+            {"_id": sid},
+            {
+                "$setOnInsert": doc_on_insert,
+                "$set": {"updated_at": now}
+            },
+            upsert=True
+        )
     except WriteError as e:
         details = getattr(e, "details", None) or {}
         err = details.get("errmsg") or str(e)
         reasons = details.get("errInfo") or {}
         st.error("❌ Failed to write session (schema validation).")
         with st.expander("Debug details (validator)"):
-            st.write({"error": err, "reasons": reasons, "doc_keys": list(doc.keys())})
+            st.write({"error": err, "reasons": reasons, "doc_keys": list(full_doc.keys())})
         raise
     return sid
 
@@ -373,7 +384,7 @@ def delete_last_today_session(uid: str, date_ist: str) -> Optional[str]:
 
 def update_session_post_checkin(sid: str, payload: Dict[str, Any]):
     db.sessions.update_one({"_id": sid, "user": USER_ID},
-                           {"$set": {"post_checkin": payload, "updated_at": datetime.now(timezone.utc)}})
+                           {"$set": {"post_checkin": payload, "updated_at": datetime.now(timezone.utc).replace(tzinfo=None)}})
 
 # ── Derived plan from active goals
 def derive_auto_plan_from_active(uid: str, week_key: str) -> Tuple[Dict[str, int], List[Dict[str, Any]]]:
@@ -541,7 +552,6 @@ with tab_timer:
             }
         timer = st.session_state.timer
 
-        # This re-renders instantly when changed
         default_idx = 0 if timer.get("kind", "focus") == "focus" else 1
         live_type = st.radio("Type", ["Work (focus)", "Activity"], index=default_idx, horizontal=True, key="live_type_choice")
 
@@ -1086,7 +1096,7 @@ with tab_planner:
                     if changed:
                         db.weekly_plans.update_one(
                             {"_id": cur_plan_saved["_id"]},
-                            {"$set": {"items": new_items, "updated_at": datetime.now(timezone.utc)}}
+                            {"$set": {"items": new_items, "updated_at": datetime.now(timezone.utc).replace(tzinfo=None)}}
                         )
                         st.success("Rollover applied to current plan.")
                         st.rerun()
