@@ -19,16 +19,21 @@ import matplotlib.pyplot as plt
 # Config / constants
 # ──────────────────────────────────────────────────────────────────────────────
 IST = pytz.timezone("Asia/Kolkata")
-
 FINISH_SOUND_URL = "https://github.com/prashanth-ds-ml/Time_Tracker/raw/refs/heads/main/one_piece_overtake.mp3"
 
+CATEGORIES = ["Learning","Projects","Certification","Career","Health","Wellbeing","Other"]
 ALLOWED_ACTIVITY_TYPES = {"exercise", "meditation", "breathing", "other"}
 ALLOWED_BUCKETS = {"current", "backlog"}
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Helpers
+# Small utils
 # ──────────────────────────────────────────────────────────────────────────────
+def utc_now_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 def play_finish_sound():
+    if not st.session_state.get("sound_on", True):
+        return
     st.markdown(
         f"""
         <audio autoplay>
@@ -106,6 +111,18 @@ def choose_last_n(label: str, available_count: int, default: int = 6, cap: int =
         st.warning("Slider fallback in use.")
         return st.number_input(label, min_value=1, max_value=maxv, value=val, step=1, key=f"{key}_num")
 
+def should_render_heavy() -> bool:
+    """Throttle heavy, multi-aggregation blocks while the timer is running."""
+    running = bool(st.session_state.get("timer", {}).get("running"))
+    if not running:
+        return True
+    now = time.time()
+    last = st.session_state.get("last_heavy", 0.0)
+    if now - last >= 10.0:
+        st.session_state["last_heavy"] = now
+        return True
+    return False
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Streamlit + DB
 # ──────────────────────────────────────────────────────────────────────────────
@@ -130,11 +147,65 @@ db = get_db()
 USER_ID = (st.secrets.get("USER_ID") or os.getenv("USER_ID") or "prashanth").strip()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Data helpers
+# Cached reads / aggregations (fast!)
 # ──────────────────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=5, show_spinner=False)
 def get_user(uid: str) -> Optional[Dict[str, Any]]:
     return db.users.find_one({"_id": uid})
 
+@st.cache_data(ttl=5, show_spinner=False)
+def get_goals(uid: str) -> List[Dict[str, Any]]:
+    return list(db.goals.find({"user": uid}).sort("updated_at", -1))
+
+@st.cache_data(ttl=5, show_spinner=False)
+def get_goals_map(uid: str) -> Dict[str, Dict[str, Any]]:
+    return {g["_id"]: g for g in get_goals(uid)}
+
+@st.cache_data(ttl=5, show_spinner=False)
+def get_week_plan(uid: str, week_key: str) -> Optional[Dict[str, Any]]:
+    return db.weekly_plans.find_one({"user": uid, "week_key": week_key})
+
+@st.cache_data(ttl=5, show_spinner=False)
+def total_day_pe(uid: str, date_ist: str) -> float:
+    pipeline = [
+        {"$match": {"user": uid, "date_ist": date_ist, "t": "W"}},
+        {"$group": {"_id": None, "pe": {"$sum": {"$ifNull": ["$pom_equiv", {"$divide": ["$dur_min", 25.0]}]}}}}
+    ]
+    doc = next(iter(db.sessions.aggregate(pipeline)), None)
+    return float(doc["pe"]) if doc else 0.0
+
+@st.cache_data(ttl=5, show_spinner=False)
+def aggregate_pe_by_goal_bucket(uid: str, week_key: str) -> Dict[str, Dict[str, float]]:
+    """
+    Returns: { goal_id: {"current": x, "backlog": y} }
+    Skips sessions without goal_id (e.g., activity).
+    """
+    out: Dict[str, Dict[str, float]] = {}
+    pipeline = [
+        {"$match": {"user": uid, "week_key": week_key, "t": "W", "goal_id": {"$exists": True, "$ne": None}}},
+        {"$group": {
+            "_id": {"goal_id": "$goal_id", "alloc_bucket": "$alloc_bucket"},
+            "pe": {"$sum": {"$ifNull": ["$pom_equiv", {"$divide": ["$dur_min", 25.0]}]}}
+        }}
+    ]
+    for row in db.sessions.aggregate(pipeline):
+        gid = row["_id"]["goal_id"]
+        bucket = row["_id"]["alloc_bucket"] or "current"
+        pe = float(row["pe"])
+        if gid not in out:
+            out[gid] = {"current": 0.0, "backlog": 0.0}
+        if bucket not in out[gid]:
+            out[gid][bucket] = 0.0
+        out[gid][bucket] += pe
+    return out
+
+@st.cache_data(ttl=5, show_spinner=False)
+def list_today_sessions(uid: str, date_ist: str) -> List[Dict[str, Any]]:
+    return list(db.sessions.find({"user": uid, "date_ist": date_ist}).sort("started_at_ist", 1))
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Data helpers (writes bust caches)
+# ──────────────────────────────────────────────────────────────────────────────
 def get_user_capacity_defaults(uid: str) -> Tuple[int, int]:
     u = get_user(uid) or {}
     prefs = (u.get("prefs") or {})
@@ -147,16 +218,10 @@ def get_rank_weight_map(uid: str) -> Dict[str, int]:
     rwm = ((u.get("prefs") or {}).get("rank_weight_map") or {"1":5,"2":3,"3":2,"4":1,"5":1})
     return {str(k): int(v) for k, v in rwm.items()}
 
-def get_goals(uid: str) -> List[Dict[str, Any]]:
-    return list(db.goals.find({"user": uid}).sort("updated_at", -1))
-
-def get_goals_map(uid: str) -> Dict[str, Dict[str, Any]]:
-    return {g["_id"]: g for g in get_goals(uid)}
-
 def create_goal(user_id: str, title: str, category: str, status: str = "In Progress",
                 priority: int = 3, tags: Optional[List[str]] = None) -> str:
     gid = uuid.uuid4().hex[:12]
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = utc_now_naive()
     doc = {
         "_id": gid, "user": user_id, "title": title.strip(),
         "category": category.strip() or "Other",
@@ -167,11 +232,13 @@ def create_goal(user_id: str, title: str, category: str, status: str = "In Progr
         "created_at": now, "updated_at": now, "schema_version": 1
     }
     db.goals.insert_one(doc)
+    st.cache_data.clear()
     return gid
 
 def update_goal(goal_id: str, updates: Dict[str, Any]):
-    updates["updated_at"] = datetime.now(timezone.utc).replace(tzinfo=None)
+    updates["updated_at"] = utc_now_naive()
     db.goals.update_one({"_id": goal_id, "user": USER_ID}, {"$set": updates})
+    st.cache_data.clear()
 
 def delete_goal(goal_id: str) -> bool:
     has_sessions = db.sessions.count_documents({"user": USER_ID, "goal_id": goal_id}) > 0
@@ -179,15 +246,13 @@ def delete_goal(goal_id: str) -> bool:
         return False
     db.weekly_plans.update_many({"user": USER_ID}, {"$pull": {"items": {"goal_id": goal_id}}})
     db.goals.delete_one({"_id": goal_id, "user": USER_ID})
+    st.cache_data.clear()
     return True
-
-def get_week_plan(uid: str, week_key: str) -> Optional[Dict[str, Any]]:
-    return db.weekly_plans.find_one({"user": uid, "week_key": week_key})
 
 def upsert_week_plan(uid: str, week_key: str, week_start: str, week_end: str,
                      capacity: Dict[str, int], items: List[Dict[str, Any]]):
     _id = f"{uid}|{week_key}"
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = utc_now_naive()
     db.weekly_plans.update_one(
         {"_id": _id},
         {"$setOnInsert": {"_id": _id, "user": uid, "created_at": now, "schema_version": 1},
@@ -195,10 +260,11 @@ def upsert_week_plan(uid: str, week_key: str, week_start: str, week_end: str,
                   "capacity": capacity, "items": items, "updated_at": now}},
         upsert=True
     )
+    st.cache_data.clear()
 
 def upsert_daily_target(uid: str, date_ist: str, target_pomos: int, target_minutes: Optional[int] = None):
     _id = f"{uid}|{date_ist}"
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = utc_now_naive()
     db.daily_targets.update_one(
         {"_id": _id},
         {"$setOnInsert": {"_id": _id, "user": uid, "date_ist": date_ist, "created_at": now, "schema_version": 1},
@@ -207,32 +273,15 @@ def upsert_daily_target(uid: str, date_ist: str, target_pomos: int, target_minut
                   "source": "user", "updated_at": now}},
         upsert=True
     )
+    st.cache_data.clear()
 
 def get_daily_target(uid: str, date_ist: str) -> Optional[Dict[str, Any]]:
     return db.daily_targets.find_one({"user": uid, "date_ist": date_ist})
 
-def sum_pe_for(uid: str, week_key: str, goal_id: str, bucket: str) -> float:
-    pipeline = [
-        {"$match": {"user": uid, "week_key": week_key, "t": "W",
-                    "goal_id": goal_id, "alloc_bucket": bucket}},
-        {"$group": {"_id": None,
-                    "pe": {"$sum": {"$ifNull": ["$pom_equiv", {"$divide": ["$dur_min", 25.0]}]}}}}
-    ]
-    doc = next(iter(db.sessions.aggregate(pipeline)), None)
-    return float(doc["pe"]) if doc else 0.0
-
-def total_day_pe(uid: str, date_ist: str) -> float:
-    pipeline = [
-        {"$match": {"user": uid, "date_ist": date_ist, "t": "W"}},
-        {"$group": {"_id": None,
-                    "pe": {"$sum": {"$ifNull": ["$pom_equiv", {"$divide": ["$dur_min", 25.0]}]}}}}
-    ]
-    doc = next(iter(db.sessions.aggregate(pipeline)), None)
-    return float(doc["pe"]) if doc else 0.0
-
 def determine_alloc_bucket(uid: str, week_key: str, goal_id: str, planned_current: int) -> str:
-    done_current_pe = sum_pe_for(uid, week_key, goal_id, "current")
-    return "current" if done_current_pe + 1e-6 < float(planned_current) else "backlog"
+    pe_map = aggregate_pe_by_goal_bucket(uid, week_key)
+    done_current = pe_map.get(goal_id, {}).get("current", 0.0)
+    return "current" if done_current + 1e-6 < float(planned_current) else "backlog"
 
 # ── Hardened insert_session (fixes 'updated_at' conflict)
 def insert_session(
@@ -243,7 +292,7 @@ def insert_session(
     *,
     kind: Optional[str] = None,               # "focus" or "activity" (for W)
     activity_type: Optional[str] = None,      # exercise/meditation/breathing/other
-    intensity: Optional[str] = None,          # only used in manual log
+    intensity: Optional[str] = None,          # only used in manual flows (we've removed manual logging)
     deep_work: Optional[bool] = None,
     goal_mode: Optional[str] = None,          # "weekly" or "custom"
     goal_id: Optional[str] = None,
@@ -276,6 +325,7 @@ def insert_session(
             kind = "focus" if t == "W" else None
 
     if kind == "activity":
+        # normalize activity fields
         if not activity_type or str(activity_type).strip().lower() not in ALLOWED_ACTIVITY_TYPES:
             activity_type = "other"
         else:
@@ -314,7 +364,7 @@ def insert_session(
             safe_pc = pc
 
     sid = f"{user_id}|{date_ist}|{t}|{int(started_at_ist.timestamp())}|{dur_min}"
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = utc_now_naive()
 
     # Build full doc then split so updated_at is NOT in $setOnInsert (avoids conflict)
     full_doc = {
@@ -345,20 +395,14 @@ def insert_session(
         "created_at": now,
         "updated_at": now,
     }
-    # Strip Nones for cleanliness
     full_doc = {k: v for k, v in full_doc.items() if v is not None}
-
-    # Split doc: $setOnInsert gets everything EXCEPT 'updated_at'
     doc_on_insert = dict(full_doc)
     doc_on_insert.pop("updated_at", None)
 
     try:
         db.sessions.update_one(
             {"_id": sid},
-            {
-                "$setOnInsert": doc_on_insert,
-                "$set": {"updated_at": now}
-            },
+            {"$setOnInsert": doc_on_insert, "$set": {"updated_at": now}},
             upsert=True
         )
     except WriteError as e:
@@ -369,22 +413,24 @@ def insert_session(
         with st.expander("Debug details (validator)"):
             st.write({"error": err, "reasons": reasons, "doc_keys": list(full_doc.keys())})
         raise
-    return sid
 
-def list_today_sessions(uid: str, date_ist: str) -> List[Dict[str, Any]]:
-    return list(db.sessions.find({"user": uid, "date_ist": date_ist}).sort("started_at_ist", 1))
+    # bust caches so UI reflects new data immediately
+    st.cache_data.clear()
+    return sid
 
 def delete_last_today_session(uid: str, date_ist: str) -> Optional[str]:
     last = db.sessions.find({"user": uid, "date_ist": date_ist}).sort("started_at_ist", -1).limit(1)
     last = next(iter(last), None)
     if last:
         db.sessions.delete_one({"_id": last["_id"]})
+        st.cache_data.clear()
         return last["_id"]
     return None
 
 def update_session_post_checkin(sid: str, payload: Dict[str, Any]):
     db.sessions.update_one({"_id": sid, "user": USER_ID},
-                           {"$set": {"post_checkin": payload, "updated_at": datetime.now(timezone.utc).replace(tzinfo=None)}})
+                           {"$set": {"post_checkin": payload, "updated_at": utc_now_naive()}})
+    st.cache_data.clear()
 
 # ── Derived plan from active goals
 def derive_auto_plan_from_active(uid: str, week_key: str) -> Tuple[Dict[str, int], List[Dict[str, Any]]]:
@@ -438,7 +484,6 @@ with st.sidebar.expander("🔍 Diagnostics", expanded=False):
         st.error(f"Diagnostics failed: {e}")
 
 today = today_iso()
-today_dt_ist = now_ist()
 default_week_key = week_key_from_datestr(today)
 goals_map = get_goals_map(USER_ID)
 default_plan = get_week_plan(USER_ID, default_week_key)
@@ -480,11 +525,14 @@ with tab_timer:
     st.header("⏱️ Focus Timer")
     st.caption(f"IST Date: **{today}** • ISO Week: **{default_week_key}**")
 
+    # global sound toggle (session-only)
+    st.toggle("🔊 Sound", value=st.session_state.get("sound_on", True), key="sound_on", help="Play a sound when the timer completes.")
+
     # Today target
     st.subheader("🎯 Today’s Target")
     tgt = get_daily_target(USER_ID, today)
     target_val = (tgt or {}).get("target_pomos", None)
-    colT1, colT2, colT3 = st.columns([1.2, 0.8, 1])
+    colT1, colT2, colT3 = st.columns([1.1, 0.9, 1])
     with colT1:
         st.metric("Target (poms)", value=target_val if target_val is not None else "—")
         actual_pe = total_day_pe(USER_ID, today)
@@ -509,36 +557,41 @@ with tab_timer:
 
     left, right = st.columns([1.15, 0.85])
 
-    # RIGHT: Current week allocation
+    # RIGHT: Current week allocation (throttled while timer is running)
     with right:
-        st.subheader("📊 Current Week Allocation")
-        plan_cur = default_plan
-        if not plan_cur or not plan_cur.get("items"):
-            st.info("No allocations yet.")
+        if should_render_heavy():
+            st.subheader("📊 Current Week Allocation")
+            plan_cur = default_plan
+            if not plan_cur or not plan_cur.get("items"):
+                st.info("No allocations yet.")
+            else:
+                pe_map = aggregate_pe_by_goal_bucket(USER_ID, default_week_key)
+                rows = []
+                for it in sorted(plan_cur.get("items", []), key=lambda x: x.get("priority_rank", 99)):
+                    gid = it["goal_id"]
+                    g = goals_map.get(gid, {})
+                    planned = int(it["planned_current"])
+                    cur_pe = pe_map.get(gid, {}).get("current", 0.0)
+                    back_pe = pe_map.get(gid, {}).get("backlog", 0.0)
+                    rows.append({
+                        "Priority": it["priority_rank"],
+                        "Goal": g.get("title", gid),
+                        "Category": g.get("category", "—"),
+                        "Planned": planned,
+                        "Backlog In": int(it["backlog_in"]),
+                        "Total Target": int(it["total_target"]),
+                        "Done Current (pe)": round(cur_pe,1),
+                        "Done Backlog (pe)": round(back_pe,1),
+                    })
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                planned_total = sum(r["Planned"] for r in rows)
+                done_total = sum(r["Done Current (pe)"] + r["Done Backlog (pe)"] for r in rows)
+                st.progress(min(done_total / max(planned_total, 1), 1.0),
+                            text=f"Adherence: {done_total:.1f} / {planned_total} pe")
         else:
-            rows = []
-            for it in sorted(plan_cur.get("items", []), key=lambda x: x.get("priority_rank", 99)):
-                gid = it["goal_id"]
-                g = goals_map.get(gid, {})
-                planned = int(it["planned_current"])
-                cur_pe = sum_pe_for(USER_ID, default_week_key, gid, "current")
-                back_pe = sum_pe_for(USER_ID, default_week_key, gid, "backlog")
-                rows.append({
-                    "Priority": it["priority_rank"],
-                    "Goal": g.get("title", gid),
-                    "Category": g.get("category", "—"),
-                    "Planned": planned,
-                    "Backlog In": int(it["backlog_in"]),
-                    "Total Target": int(it["total_target"]),
-                    "Done Current (pe)": round(cur_pe,1),
-                    "Done Backlog (pe)": round(back_pe,1),
-                })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-            planned_total = sum(r["Planned"] for r in rows)
-            done_total = sum(r["Done Current (pe)"] + r["Done Backlog (pe)"] for r in rows)
-            st.progress(min(done_total / max(planned_total, 1), 1.0), text=f"Adherence: {done_total:.1f} / {planned_total} pe")
+            st.caption("⏳ Timer running — heavy panel will refresh every ~10s.")
 
-    # LEFT: Live Timer (radio OUTSIDE any form)
+    # LEFT: Live Timer (single source of truth for logging)
     with left:
         st.subheader("⏳ Live Timer")
 
@@ -546,49 +599,73 @@ with tab_timer:
             st.session_state.timer = {
                 "running": False, "end_ts": None, "started_at": None, "completed": False,
                 "t": "W", "dur_min": 25, "kind": "focus",
-                "activity_type": None, "intensity": None,
+                "activity_type": None,
                 "deep_work": True, "goal_id": None, "task": None, "cat": None,
                 "alloc_bucket": None, "auto_break": True, "break_min": 5
             }
         timer = st.session_state.timer
+
+        # quick start (no form submit required)
+        qc1, qc2, qc3 = st.columns(3)
+        with qc1:
+            if st.button("▶️ Focus 25m", use_container_width=True):
+                st.session_state["live_type_choice"] = "Work (focus)"
+                st.session_state["live_focus_dur"] = 25
+        with qc2:
+            if st.button("▶️ Focus 50m", use_container_width=True):
+                st.session_state["live_type_choice"] = "Work (focus)"
+                st.session_state["live_focus_dur"] = 50
+        with qc3:
+            if st.button("▶️ Activity 10m", use_container_width=True):
+                st.session_state["live_type_choice"] = "Activity"
+                st.session_state["live_act_dur"] = 10
 
         default_idx = 0 if timer.get("kind", "focus") == "focus" else 1
         live_type = st.radio("Type", ["Work (focus)", "Activity"], index=default_idx, horizontal=True, key="live_type_choice")
 
         # Focus form
         if live_type == "Work (focus)":
+            # tiny filter for long goal lists
+            filt = st.text_input("Filter goals (title contains…)", key="goal_filter", placeholder="optional")
+
             with st.form("focus_live_form", clear_on_submit=False):
                 dur_live = st.number_input("Work duration (minutes)", min_value=5, max_value=120,
-                                           value=timer.get("dur_min", 25), step=1, key="live_focus_dur")
+                                           value=int(st.session_state.get("live_focus_dur", timer.get("dur_min", 25))),
+                                           step=1, key="live_focus_dur")
                 deep_live = (dur_live >= 23)
 
                 labels = []
                 choices = []
                 plan_src = default_plan or {}
                 items_for_pick = plan_src.get("items", [])
+                pe_map = aggregate_pe_by_goal_bucket(USER_ID, default_week_key)
+
                 if items_for_pick:
                     st.caption("Current week's goals:")
                     for it in sorted(items_for_pick, key=lambda x: x.get("priority_rank", 99)):
                         gid = it["goal_id"]; g = goals_map.get(gid, {})
                         title = g.get("title", gid); gcat = g.get("category","—")
+                        if filt and filt.lower() not in title.lower():
+                            continue
                         planned = int(it.get("planned_current",0))
-                        cur_pe = sum_pe_for(USER_ID, default_week_key, gid, "current")
+                        cur_pe = pe_map.get(gid, {}).get("current", 0.0)
                         rem_cur = max(planned - cur_pe, 0)
                         labels.append(f"[P{it.get('priority_rank')}] {title} · {gcat} • current {rem_cur}/{planned} • backlog {it.get('backlog_in',0)}")
                         choices.append((gid, planned))
-                    sel_label = st.radio("Pick goal", labels, index=0, key="live_pick_goal")
-                    idx = labels.index(sel_label)
-                    goal_id, planned_current = choices[idx]
-                    alloc_bucket = determine_alloc_bucket(USER_ID, default_week_key, goal_id, planned_current) if planned_current > 0 else None
-                    cat = goals_map.get(goal_id, {}).get("category")
+                    if labels:
+                        sel_label = st.radio("Pick goal", labels, index=0, key="live_pick_goal")
+                        idx = labels.index(sel_label)
+                        goal_id, planned_current = choices[idx]
+                        alloc_bucket = determine_alloc_bucket(USER_ID, default_week_key, goal_id, planned_current) if planned_current > 0 else None
+                        cat = goals_map.get(goal_id, {}).get("category")
+                    else:
+                        goal_id = None; alloc_bucket=None; cat=None
+                        st.info("No matching goals. Clear the filter or add goals in Planner.")
                 else:
-                    goal_id = None
-                    alloc_bucket = None
-                    cat = None
+                    goal_id = None; alloc_bucket=None; cat=None
                     st.info("No active goals found. Create a goal in Weekly Planner.")
 
                 task_text = st.text_input("Optional task note", key="live_task_note")
-
                 auto_break = st.checkbox("Auto-break after Work", value=True, key="live_ab")
                 break_min = st.number_input("Break length (min)", 1, 30, value=5, key="live_break_min")
 
@@ -600,7 +677,6 @@ with tab_timer:
                     "t": "W",
                     "kind": "focus",
                     "activity_type": None,
-                    "intensity": None,
                     "deep_work": (dur_live >= 23),
                     "goal_id": goal_id,
                     "task": task_text, "cat": cat,
@@ -614,10 +690,10 @@ with tab_timer:
         else:
             with st.form("activity_live_form", clear_on_submit=False):
                 dur_live = st.number_input("Activity duration (minutes)", min_value=1, max_value=180,
-                                           value=10, step=1, key="live_act_dur")
+                                           value=int(st.session_state.get("live_act_dur", 10)),
+                                           step=1, key="live_act_dur")
                 activity_type = st.selectbox("Activity type", ["exercise","meditation","breathing","other"], index=1, key="live_act_type")
                 note_text = st.text_input("Optional activity note", key="live_act_note")
-
                 start_activity = st.form_submit_button("▶️ Start Activity Timer", use_container_width=True)
 
             if start_activity and not timer["running"]:
@@ -626,7 +702,6 @@ with tab_timer:
                     "t": "W",
                     "kind": "activity",
                     "activity_type": activity_type,
-                    "intensity": None,
                     "deep_work": None,
                     "goal_id": None,
                     "task": note_text, "cat": "Wellbeing",
@@ -692,7 +767,6 @@ with tab_timer:
                     kind=("focus" if timer["kind"] == "focus" and timer["t"] == "W" else
                           "activity" if timer["kind"] == "activity" and timer["t"] == "W" else None),
                     activity_type=(timer["activity_type"] if timer["kind"] == "activity" else None),
-                    intensity=None,
                     deep_work=(timer["deep_work"] if (timer["kind"] == "focus" and timer["t"] == "W") else None),
                     goal_mode=("weekly" if (timer["kind"] == "focus" and timer.get("goal_id") and (default_plan and default_plan.get("items"))) else
                                "custom" if (timer["kind"] == "focus" and timer["t"] == "W") else None),
@@ -718,12 +792,12 @@ with tab_timer:
                     timer.update({
                         "running": True, "completed": False,
                         "t": "B", "dur_min": timer["break_min"], "kind": None,
-                        "activity_type": None, "intensity": None, "deep_work": None,
+                        "activity_type": None, "deep_work": None,
                         "goal_id": None, "task": None, "cat": None, "alloc_bucket": None,
                         "auto_break": False,
                         "started_at": now_ist(), "end_ts": now_ist() + timedelta(minutes=timer["break_min"])
                     })
-                    st.info("Starting auto-break…")
+                    st.toast("Auto-break started.", icon="⏱️")
                 st.rerun()
 
             if refresh:
@@ -733,140 +807,26 @@ with tab_timer:
             st.rerun()
 
     st.divider()
-    st.subheader("🎛️ Log a Session (manual)")
 
-    # Work (focus) manual
-    with st.container():
-        st.markdown("#### Work (focus)")
-        if st.session_state.get("pending_sid") and st.session_state.get("pending_kind") == "focus":
-            with st.expander("🧠 Post-check-in for your last Work session", expanded=True):
-                colQ, colM, colE = st.columns(3)
-                q = colQ.slider("Quality (1–5)", 1, 5, 4, key="pc_w_q")
-                m = colM.slider("Mood (1–5)", 1, 5, 4, key="pc_w_m")
-                e = colE.slider("Energy (1–5)", 1, 5, 4, key="pc_w_e")
-                note = st.text_input("Quick note (optional)", key="pc_w_note")
-                if st.button("Save check-in", use_container_width=True, key="pc_w_save"):
-                    update_session_post_checkin(st.session_state["pending_sid"], {
-                        "quality_1to5": int(q), "mood_1to5": int(m),
-                        "energy_1to5": int(e), "distraction": None,
-                        "note": (note or None)
-                    })
-                    st.success("Saved.")
-                    st.session_state.pop("pending_sid", None)
-                    st.session_state.pop("pending_kind", None)
-
-        with st.form("manual_work_form", clear_on_submit=True):
-            dur_min = st.number_input("Work duration (minutes)", min_value=5, max_value=120, value=25, step=1, key="manual_focus_dur")
-            labels=[]; choices=[]
-            plan_src = default_plan or {}
-            items_for_pick = plan_src.get("items", [])
-            if items_for_pick:
-                items = sorted(items_for_pick, key=lambda x: x.get("priority_rank", 99))
-                for it in items:
-                    gid = it["goal_id"]
-                    g = goals_map.get(gid, {})
-                    gtitle = g.get("title", gid)
-                    gcat = g.get("category", "—")
-                    planned = int(it.get("planned_current", 0))
-                    cur_pe = sum_pe_for(USER_ID, default_week_key, gid, "current")
-                    rem_cur = max(planned - cur_pe, 0)
-                    labels.append(f"[P{it.get('priority_rank')}] {gtitle} · {gcat} • current {rem_cur}/{planned} • backlog {it.get('backlog_in',0)}")
-                    choices.append((gid, planned))
-            else:
-                st.warning("No weekly goals available. Add Active goals in Planner.")
-
-            goal_id=None; planned_current = 0; alloc_bucket=None; cat=None
-            if labels:
-                sel = st.radio("Choose goal", labels, index=0, key="manual_pick_goal")
-                idx = labels.index(sel)
-                goal_id, planned_current = choices[idx]
-                alloc_bucket = determine_alloc_bucket(USER_ID, default_week_key, goal_id, planned_current) if planned_current > 0 else None
-                cat = goals_map.get(goal_id, {}).get("category")
-
-            task_text = st.text_input("Optional task note", key="manual_task_note")
-            ended_now = st.checkbox("End at now (IST)", value=True, key="manual_work_now")
-            if ended_now:
-                end_dt_ist = now_ist()
-            else:
-                tval = st.time_input("End time (IST)", value=now_ist().time(), key="manual_work_time")
-                end_dt_ist = IST.localize(datetime.combine(now_ist().date(), tval))
-
+    # Post-check-in prompts (appear only after timer completion)
+    if st.session_state.get("pending_sid") and st.session_state.get("pending_kind") in {"focus","activity"}:
+        kind_lab = "Work" if st.session_state["pending_kind"] == "focus" else "Activity"
+        with st.expander(f"🧠 Post-check-in for your last {kind_lab} session", expanded=True):
             colQ, colM, colE = st.columns(3)
-            q = colQ.slider("Quality (1–5)", 1, 5, 4, key="manual_work_q")
-            m = colM.slider("Mood (1–5)", 1, 5, 4, key="manual_work_m")
-            e = colE.slider("Energy (1–5)", 1, 5, 4, key="manual_work_e")
-            note = st.text_input("Reflection note (optional)", key="manual_work_note")
+            q = colQ.slider("Quality (1–5)", 1, 5, 4, key="pc_q")
+            m = colM.slider("Mood (1–5)", 1, 5, 4, key="pc_m")
+            e = colE.slider("Energy (1–5)", 1, 5, 4, key="pc_e")
+            note = st.text_input("Quick note (optional)", key="pc_note")
+            if st.button("Save check-in", use_container_width=True, key="pc_save"):
+                update_session_post_checkin(st.session_state["pending_sid"], {
+                    "quality_1to5": int(q), "mood_1to5": int(m),
+                    "energy_1to5": int(e), "distraction": None,
+                    "note": (note or None)
+                })
+                st.success("Saved.")
+                st.session_state.pop("pending_sid", None)
+                st.session_state.pop("pending_kind", None)
 
-            submit = st.form_submit_button("Log Work", use_container_width=True)
-            if submit:
-                sid = insert_session(
-                    USER_ID, "W", int(dur_min), end_dt_ist,
-                    kind="focus", activity_type=None, intensity=None, deep_work=(int(dur_min) >= 23),
-                    goal_mode=("weekly" if (items_for_pick and planned_current > 0) else "custom"),
-                    goal_id=(goal_id or None),
-                    task=task_text, cat=cat, alloc_bucket=(alloc_bucket if planned_current > 0 else None),
-                    break_autostart=True, skipped=None,
-                    post_checkin={"quality_1to5": int(q), "mood_1to5": int(m),
-                                  "energy_1to5": int(e), "distraction": None,
-                                  "note": (note or None)},
-                    device="web"
-                )
-                st.success(f"Logged work. id={sid}")
-                st.rerun()
-
-    # Activity manual (with intensity)
-    with st.container():
-        st.markdown("#### Activity")
-        if st.session_state.get("pending_sid") and st.session_state.get("pending_kind") == "activity":
-            with st.expander("🧠 Post-check-in for your last Activity session", expanded=True):
-                colQ, colM, colE = st.columns(3)
-                q = colQ.slider("Quality (1–5)", 1, 5, 4, key="pc_a_q")
-                m = colM.slider("Mood (1–5)", 1, 5, 4, key="pc_a_m")
-                e = colE.slider("Energy (1–5)", 1, 5, 4, key="pc_a_e")
-                note = st.text_input("Quick note (optional)", key="pc_a_note")
-                if st.button("Save check-in", use_container_width=True, key="pc_a_save"):
-                    update_session_post_checkin(st.session_state["pending_sid"], {
-                        "quality_1to5": int(q), "mood_1to5": int(m),
-                        "energy_1to5": int(e), "distraction": None,
-                        "note": (note or None)
-                    })
-                    st.success("Saved.")
-                    st.session_state.pop("pending_sid", None)
-                    st.session_state.pop("pending_kind", None)
-
-        with st.form("manual_act_form", clear_on_submit=True):
-            dur_min = st.number_input("Duration (minutes)", min_value=1, max_value=180, value=10, step=1, key="manual_act_dur")
-            activity_type = st.selectbox("Activity type", ["exercise","meditation","breathing","other"], index=1, key="manual_act_type")
-            intensity = st.selectbox("Intensity", ["light","moderate","vigorous"], index=0, key="manual_act_intensity")
-            ended_now = st.checkbox("End at now (IST)", value=True, key="manual_act_now")
-            if ended_now:
-                end_dt_ist = now_ist()
-            else:
-                tval = st.time_input("End time (IST)", value=now_ist().time(), key="manual_act_time")
-                end_dt_ist = IST.localize(datetime.combine(now_ist().date(), tval))
-
-            colQ, colM, colE = st.columns(3)
-            q = colQ.slider("Quality (1–5)", 1, 5, 4, key="manual_act_q")
-            m = colM.slider("Mood (1–5)", 1, 5, 4, key="manual_act_m")
-            e = colE.slider("Energy (1–5)", 1, 5, 4, key="manual_act_e")
-            note = st.text_input("Reflection note (optional)", key="manual_act_note")
-
-            submit = st.form_submit_button("Log Activity", use_container_width=True)
-            if submit:
-                sid = insert_session(
-                    USER_ID, "W", int(dur_min), end_dt_ist,
-                    kind="activity", activity_type=activity_type, intensity=intensity,
-                    deep_work=None, goal_mode=None, goal_id=None, task=None, cat="Wellbeing",
-                    alloc_bucket=None, break_autostart=False, skipped=None,
-                    post_checkin={"quality_1to5": int(q), "mood_1to5": int(m),
-                                  "energy_1to5": int(e), "distraction": None,
-                                  "note": (note or None)},
-                    device="web"
-                )
-                st.success(f"Logged activity. id={sid}")
-                st.rerun()
-
-    st.divider()
     st.subheader("📝 Today’s Sessions")
     todays = list_today_sessions(USER_ID, today)
     if not todays:
@@ -1041,13 +1001,14 @@ with tab_planner:
     if not plan_cur or not plan_cur.get("items"):
         st.info("No allocations yet.")
     else:
+        pe_map = aggregate_pe_by_goal_bucket(USER_ID, wk)
         rows = []
         for it in sorted(plan_cur.get("items", []), key=lambda x: x.get("priority_rank", 99)):
             gid = it["goal_id"]
             g = goals_map.get(gid, {})
             planned = int(it["planned_current"])
-            cur_pe = sum_pe_for(USER_ID, wk, gid, "current")
-            back_pe = sum_pe_for(USER_ID, wk, gid, "backlog")
+            cur_pe = pe_map.get(gid, {}).get("current", 0.0)
+            back_pe = pe_map.get(gid, {}).get("backlog", 0.0)
             rows.append({
                 "Priority": it["priority_rank"],
                 "Goal": g.get("title", gid),
@@ -1068,14 +1029,12 @@ with tab_planner:
                 st.warning("No previous week plan found.")
             else:
                 carry_map = {}
+                # compute per-goal total PE in prev week
+                pe_prev = aggregate_pe_by_goal_bucket(USER_ID, prev_wk)
                 for it in prev.get("items", []):
                     gid = it["goal_id"]
                     total_target = int(it.get("total_target", 0))
-                    pe_doc = next(iter(db.sessions.aggregate([
-                        {"$match": {"user": USER_ID, "week_key": prev_wk, "t":"W", "goal_id": gid}},
-                        {"$group": {"_id": None, "pe": {"$sum": {"$ifNull": ["$pom_equiv", {"$divide": ["$dur_min", 25.0]}]}}}}
-                    ])), None)
-                    actual = int(round(float(pe_doc["pe"]) if pe_doc else 0.0))
+                    actual = int(round(pe_prev.get(gid, {}).get("current", 0.0) + pe_prev.get(gid, {}).get("backlog", 0.0)))
                     carry_map[gid] = max(total_target - actual, 0)
 
                 cur_plan_saved = get_week_plan(USER_ID, wk)
@@ -1088,16 +1047,18 @@ with tab_planner:
                         gid = it["goal_id"]
                         if gid in carry_map:
                             bi = int(carry_map[gid])
-                            if it.get("backlog_in") != bi or it.get("total_target") != bi + int(it.get("planned_current", 0)):
+                            new_total = int(it.get("planned_current", 0)) + bi
+                            if it.get("backlog_in") != bi or it.get("total_target") != new_total:
                                 it["backlog_in"] = bi
-                                it["total_target"] = int(it.get("planned_current", 0)) + bi
+                                it["total_target"] = new_total
                                 changed = True
                         new_items.append(it)
                     if changed:
                         db.weekly_plans.update_one(
                             {"_id": cur_plan_saved["_id"]},
-                            {"$set": {"items": new_items, "updated_at": datetime.now(timezone.utc).replace(tzinfo=None)}}
+                            {"$set": {"items": new_items, "updated_at": utc_now_naive()}}
                         )
+                        st.cache_data.clear()
                         st.success("Rollover applied to current plan.")
                         st.rerun()
                     else:
@@ -1109,7 +1070,7 @@ with tab_planner:
     with st.expander("➕ Add a new goal", expanded=False):
         c1, c2, c3 = st.columns([2,1,1])
         with c1: new_title = st.text_input("Title", key="g_title")
-        with c2: new_category = st.selectbox("Category", ["Learning","Projects","Certification","Career","Health","Wellbeing","Other"], index=0, key="g_cat")
+        with c2: new_category = st.selectbox("Category", CATEGORIES, index=0, key="g_cat")
         with c3: new_status = st.selectbox("Status", ["In Progress","On Hold","Completed"], index=0, key="g_status")
         c4, c5 = st.columns([1,2])
         with c4: new_priority = st.selectbox("Priority (1=highest)", options=[1,2,3,4,5], index=2, key="g_priority")
@@ -1142,13 +1103,15 @@ with tab_planner:
         else:
             planned_by_goal = {it["goal_id"]: int(it["planned_current"]) for it in current_plan.get("items", [])}
 
+        pe_map = aggregate_pe_by_goal_bucket(USER_ID, current_wk)
+
         for g in active_goals:
             gid = g["_id"]
             planned = planned_by_goal.get(gid, 0)
             with st.container(border=True):
                 st.write(f"**{g.get('title')}** · _{g.get('category','')}_ · priority {g.get('priority',3)}")
                 if planned > 0:
-                    cur_pe = sum_pe_for(USER_ID, current_wk, gid, "current")
+                    cur_pe = pe_map.get(gid, {}).get("current", 0.0)
                     st.progress(min(cur_pe / max(planned,1), 1.0), text=f"Current {cur_pe:.1f} / Planned {planned} pe")
                 else:
                     st.caption("Not allocated this week (derived plan may assign 0).")
@@ -1161,8 +1124,8 @@ with tab_planner:
                                            index={"In Progress":0,"On Hold":1,"Completed":2}.get(g.get("status","In Progress"),0),
                                            key=f"edit_s_{gid}")
                 with cols[2]:
-                    ecat = st.selectbox("Category", ["Learning","Projects","Certification","Career","Health","Wellbeing","Other"],
-                                        index=max(0, ["Learning","Projects","Certification","Career","Health","Wellbeing","Other"].index(g.get("category","Learning"))) if g.get("category") in ["Learning","Projects","Certification","Career","Health","Wellbeing","Other"] else 0,
+                    ecat = st.selectbox("Category", CATEGORIES,
+                                        index=max(0, CATEGORIES.index(g.get("category","Learning"))) if g.get("category") in CATEGORIES else 0,
                                         key=f"edit_c_{gid}")
                 with cols[3]:
                     eprio = st.selectbox("Priority", options=[1,2,3,4,5], index=int(g.get("priority",3))-1, key=f"edit_p_{gid}")
@@ -1188,8 +1151,8 @@ with tab_planner:
                 with cols[0]:
                     etitle = st.text_input("Edit title", value=g.get("title",""), key=f"hold_t_{g['_id']}")
                 with cols[1]:
-                    ecat = st.selectbox("Category", ["Learning","Projects","Certification","Career","Health","Wellbeing","Other"],
-                                        index=max(0, ["Learning","Projects","Certification","Career","Health","Wellbeing","Other"].index(g.get("category","Learning"))) if g.get("category") in ["Learning","Projects","Certification","Career","Health","Wellbeing","Other"] else 0,
+                    ecat = st.selectbox("Category", CATEGORIES,
+                                        index=max(0, CATEGORIES.index(g.get("category","Learning"))) if g.get("category") in CATEGORIES else 0,
                                         key=f"hold_c_{g['_id']}")
                 with cols[2]:
                     eprio = st.selectbox("Priority", options=[1,2,3,4,5], index=int(g.get("priority",3))-1, key=f"hold_p_{g['_id']}")
