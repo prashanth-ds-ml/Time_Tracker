@@ -1,6 +1,7 @@
 # app.py
 import os
 import uuid
+import time
 from datetime import datetime, timedelta, timezone, date
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -11,15 +12,23 @@ import pandas as pd
 import streamlit as st
 from streamlit.errors import StreamlitAPIException
 from pymongo import MongoClient
+from pymongo.errors import WriteError
 import matplotlib.pyplot as plt
 
-import time  # NEW
+# ──────────────────────────────────────────────────────────────────────────────
+# Config / constants
+# ──────────────────────────────────────────────────────────────────────────────
+IST = pytz.timezone("Asia/Kolkata")
 
-# Timer-finish sound (your URL)
 FINISH_SOUND_URL = "https://github.com/prashanth-ds-ml/Time_Tracker/raw/refs/heads/main/one_piece_overtake.mp3"
 
+ALLOWED_ACTIVITY_TYPES = {"exercise", "meditation", "breathing", "other"}
+ALLOWED_BUCKETS = {"current", "backlog"}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────────
 def play_finish_sound():
-    """Autoplay a sound once. Works in browsers after a user interaction (starting the timer counts)."""
     st.markdown(
         f"""
         <audio autoplay>
@@ -29,28 +38,6 @@ def play_finish_sound():
         unsafe_allow_html=True,
     )
 
-
-# ─ Live refresh helper (best-effort) ─
-def live_autorefresh(active: bool, key: str = "live_tick") -> bool:
-    """
-    Try to auto-refresh the page every second while the timer is running.
-    Uses streamlit-autorefresh if available; otherwise returns False (manual fallback).
-    """
-    if not active:
-        return False
-    try:
-        # optional dependency: pip install streamlit-autorefresh
-        from streamlit_autorefresh import st_autorefresh
-        st_autorefresh(interval=3, limit=None, key=key)
-        return True
-    except Exception:
-        return False
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Config / utils
-# ──────────────────────────────────────────────────────────────────────────────
-IST = pytz.timezone("Asia/Kolkata")
-
 def now_ist() -> datetime:
     return datetime.now(IST)
 
@@ -59,6 +46,12 @@ def today_iso() -> str:
 
 def utc_from_ist(dt_ist: datetime) -> datetime:
     return dt_ist.astimezone(timezone.utc)
+
+def _to_utc_naive(dt: datetime) -> datetime:
+    """Return UTC-naive datetime for Mongo 'date' type."""
+    if dt.tzinfo is None:
+        dt = IST.localize(dt)
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
 def week_key_from_datestr(datestr: str) -> str:
     y, m, d = map(int, datestr.split("-"))
@@ -72,7 +65,6 @@ def week_key_from_date(d: date) -> str:
 
 def monday_from_week_key(week_key: str) -> datetime:
     year, wk = map(int, week_key.split("-"))
-    # isocalendar: Monday=1
     return IST.localize(datetime.fromisocalendar(year, wk, 1))
 
 def prev_week_key(week_key: str) -> str:
@@ -145,7 +137,6 @@ def get_user_capacity_defaults(uid: str) -> Tuple[int, int]:
 def get_rank_weight_map(uid: str) -> Dict[str, int]:
     u = get_user(uid) or {}
     rwm = ((u.get("prefs") or {}).get("rank_weight_map") or {"1":5,"2":3,"3":2,"4":1,"5":1})
-    # ensure str keys
     return {str(k): int(v) for k, v in rwm.items()}
 
 def get_goals(uid: str) -> List[Dict[str, Any]]:
@@ -235,6 +226,7 @@ def determine_alloc_bucket(uid: str, week_key: str, goal_id: str, planned_curren
     done_current_pe = sum_pe_for(uid, week_key, goal_id, "current")
     return "current" if done_current_pe + 1e-6 < float(planned_current) else "backlog"
 
+# ── Hardened insert_session: always satisfies your validators
 def insert_session(
     user_id: str,
     t: str,                 # "W" or "B"
@@ -243,7 +235,7 @@ def insert_session(
     *,
     kind: Optional[str] = None,               # "focus" or "activity" (for W)
     activity_type: Optional[str] = None,      # exercise/meditation/breathing/other
-    intensity: Optional[str] = None,
+    intensity: Optional[str] = None,          # kept for manual log
     deep_work: Optional[bool] = None,
     goal_mode: Optional[str] = None,          # "weekly" or "custom"
     goal_id: Optional[str] = None,
@@ -255,24 +247,113 @@ def insert_session(
     post_checkin: Optional[Dict[str, Any]] = None,
     device: Optional[str] = "web"
 ) -> str:
+    # normalize core
+    t = "B" if str(t).upper() == "B" else "W"
+    dur_min = max(1, int(dur_min))
     pe = pom_equiv(dur_min)
+
+    if ended_at_ist.tzinfo is None:
+        ended_at_ist = IST.localize(ended_at_ist)
     started_at_ist = ended_at_ist - timedelta(minutes=dur_min)
+
+    started_utc = _to_utc_naive(started_at_ist)
+    ended_utc   = _to_utc_naive(ended_at_ist)
+
     date_ist = started_at_ist.astimezone(IST).date().isoformat()
     week_key = week_key_from_datestr(date_ist)
+
+    # normalize enums & combos
+    kind = (kind or None)
+    if kind is not None:
+        kind = str(kind).strip().lower()
+        if kind not in {"focus", "activity"}:
+            kind = "focus" if t == "W" else None
+
+    if kind == "activity":
+        if not activity_type or str(activity_type).strip().lower() not in ALLOWED_ACTIVITY_TYPES:
+            activity_type = "other"
+        else:
+            activity_type = str(activity_type).strip().lower()
+        goal_mode = None
+        goal_id = None
+        alloc_bucket = None
+        deep_work = None
+        cat = cat or "Wellbeing"
+    else:
+        activity_type = None
+
+    if kind == "focus" and goal_mode == "weekly" and goal_id:
+        if alloc_bucket:
+            alloc_bucket = str(alloc_bucket).strip().lower()
+            if alloc_bucket not in ALLOWED_BUCKETS:
+                alloc_bucket = None
+    else:
+        goal_mode = ("custom" if (kind == "focus" and t == "W" and not goal_id) else goal_mode)
+        alloc_bucket = None
+
+    # safe post_checkin
+    safe_pc = None
+    if isinstance(post_checkin, dict):
+        pc = {}
+        q = post_checkin.get("quality_1to5")
+        m = post_checkin.get("mood_1to5")
+        e = post_checkin.get("energy_1to5")
+        if isinstance(q, int) and 1 <= q <= 5: pc["quality_1to5"] = q
+        if isinstance(m, int) and 1 <= m <= 5: pc["mood_1to5"] = m
+        if isinstance(e, int) and 1 <= e <= 5: pc["energy_1to5"] = e
+        if post_checkin.get("distraction") is not None:
+            pc["distraction"] = str(post_checkin.get("distraction"))
+        if post_checkin.get("note") is not None:
+            pc["note"] = str(post_checkin.get("note"))
+        if pc:
+            safe_pc = pc
+
     sid = f"{user_id}|{date_ist}|{t}|{int(started_at_ist.timestamp())}|{dur_min}"
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
     doc = {
-        "_id": sid, "user": user_id, "date_ist": date_ist, "week_key": week_key,
-        "t": t, "kind": kind, "activity_type": activity_type, "intensity": intensity,
-        "dur_min": int(dur_min), "pom_equiv": pe,
-        "started_at_ist": utc_from_ist(started_at_ist), "ended_at_ist": utc_from_ist(ended_at_ist),
-        "deep_work": deep_work, "context_switch": False,
-        "goal_mode": goal_mode, "goal_id": goal_id, "task": task, "cat": cat,
-        "alloc_bucket": alloc_bucket, "break_autostart": break_autostart, "skipped": skipped,
-        "post_checkin": post_checkin, "device": device,
-        "created_at": now, "updated_at": now, "schema_version": 1
+        "_id": sid,
+        "user": user_id,
+        "date_ist": date_ist,
+        "week_key": week_key,
+        "t": t,
+        "dur_min": int(dur_min),
+        "pom_equiv": float(pe),
+        "started_at_ist": started_utc,
+        "ended_at_ist": ended_utc,
+        "schema_version": 1,
+        "kind": kind,
+        "activity_type": activity_type,
+        "intensity": (str(intensity).strip().lower() if intensity else None),
+        "deep_work": (bool(deep_work) if isinstance(deep_work, bool) else None),
+        "context_switch": False,
+        "goal_mode": (str(goal_mode).strip().lower() if goal_mode else None),
+        "goal_id": goal_id,
+        "task": (str(task) if task else None),
+        "cat": (str(cat) if cat else None),
+        "alloc_bucket": alloc_bucket,
+        "break_autostart": (bool(break_autostart) if isinstance(break_autostart, bool) else None),
+        "skipped": (bool(skipped) if isinstance(skipped, bool) else None),
+        "post_checkin": safe_pc,
+        "device": (str(device) if device else None),
+        "created_at": now,
+        "updated_at": now,
     }
-    db.sessions.update_one({"_id": sid}, {"$setOnInsert": doc, "$set": {"updated_at": now}}, upsert=True)
+    # prune Nones
+    doc = {k: v for k, v in doc.items() if v is not None}
+
+    try:
+        db.sessions.update_one({"_id": sid},
+                               {"$setOnInsert": doc, "$set": {"updated_at": now}},
+                               upsert=True)
+    except WriteError as e:
+        details = getattr(e, "details", None) or {}
+        err = details.get("errmsg") or str(e)
+        reasons = details.get("errInfo") or {}
+        st.error("❌ Failed to write session (schema validation).")
+        with st.expander("Debug details (validator)"):
+            st.write({"error": err, "reasons": reasons, "doc_keys": list(doc.keys())})
+        raise
     return sid
 
 def list_today_sessions(uid: str, date_ist: str) -> List[Dict[str, Any]]:
@@ -290,21 +371,17 @@ def update_session_post_checkin(sid: str, payload: Dict[str, Any]):
     db.sessions.update_one({"_id": sid, "user": USER_ID},
                            {"$set": {"post_checkin": payload, "updated_at": datetime.now(timezone.utc)}})
 
-# ── Derived plan from all active goals
+# ── Derived plan from active goals
 def derive_auto_plan_from_active(uid: str, week_key: str) -> Tuple[Dict[str, int], List[Dict[str, Any]]]:
-    # capacity from user prefs
     wkday, wkend = get_user_capacity_defaults(uid)
     total_capacity = wkday * 5 + wkend * 2
     rwm = get_rank_weight_map(uid)
-
     goals = [g for g in get_goals(uid) if g.get("status") == "In Progress"]
     if not goals or total_capacity <= 0:
         return ({"weekday": wkday, "weekend": wkend, "total": total_capacity}, [])
-
     def w_for(g):
         rank = int(g.get("priority", 3))
         return int(rwm.get(str(rank), 1))
-
     weights = [w_for(g) for g in goals]
     wsum = sum(weights) or 1
     shares = [(w / wsum) * total_capacity for w in weights]
@@ -314,7 +391,6 @@ def derive_auto_plan_from_active(uid: str, week_key: str) -> Tuple[Dict[str, int
     order = np.argsort(-np.array(frac))
     for i in range(int(left)):
         base[order[i]] += 1
-
     items = []
     for g, pc in zip(goals, base):
         rank = int(g.get("priority", 3))
@@ -331,7 +407,7 @@ def derive_auto_plan_from_active(uid: str, week_key: str) -> Tuple[Dict[str, int
     return ({"weekday": wkday, "weekend": wkend, "total": total_capacity}, items)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Sidebar (minimal)
+# Sidebar
 # ──────────────────────────────────────────────────────────────────────────────
 st.sidebar.header("⚙️ Connection")
 st.sidebar.write(f"**DB:** `{db.name}`")
@@ -346,14 +422,11 @@ with st.sidebar.expander("🔍 Diagnostics", expanded=False):
     except Exception as e:
         st.error(f"Diagnostics failed: {e}")
 
-# derive current week by ISO
 today = today_iso()
 today_dt_ist = now_ist()
 default_week_key = week_key_from_datestr(today)
 goals_map = get_goals_map(USER_ID)
 default_plan = get_week_plan(USER_ID, default_week_key)
-
-# If no saved plan for current ISO week, derive from Active goals
 if not default_plan:
     cap_auto, items_auto = derive_auto_plan_from_active(USER_ID, default_week_key)
     default_plan = {
@@ -364,7 +437,7 @@ if not default_plan:
         "week_end": week_dates_list(default_week_key)[-1],
         "capacity": cap_auto,
         "items": items_auto,
-        "derived": True  # mark not yet saved
+        "derived": True
     }
 
 st.sidebar.subheader(f"📅 Week {default_week_key}")
@@ -380,19 +453,19 @@ else:
 # ──────────────────────────────────────────────────────────────────────────────
 tab_timer, tab_planner, tab_analytics = st.tabs(["⏱️ Timer & Log", "🗂️ Weekly Planner", "📈 Analytics"])
 
-# =============================================================================
-# TAB 1: Timer & Log
-# =============================================================================
-# If we flagged a beep on the previous tick, play it now and clear the flag.
+# If we flagged a beep previously, play once and clear
 if st.session_state.get("beep_once"):
     play_finish_sound()
     st.session_state["beep_once"] = False
 
+# =============================================================================
+# TAB 1: Timer & Log
+# =============================================================================
 with tab_timer:
     st.header("⏱️ Focus Timer")
     st.caption(f"IST Date: **{today}** • ISO Week: **{default_week_key}**")
 
-    # Today Target
+    # Today target
     st.subheader("🎯 Today’s Target")
     tgt = get_daily_target(USER_ID, today)
     target_val = (tgt or {}).get("target_pomos", None)
@@ -419,10 +492,9 @@ with tab_timer:
 
     st.divider()
 
-    # Split layout: left live timer + log; right current week plan table
     left, right = st.columns([1.15, 0.85])
 
-    # ── RIGHT: Current week allocation (saved or derived)
+    # RIGHT: Current week allocation
     with right:
         st.subheader("📊 Current Week Allocation")
         plan_cur = default_plan
@@ -451,14 +523,15 @@ with tab_timer:
             done_total = sum(r["Done Current (pe)"] + r["Done Backlog (pe)"] for r in rows)
             st.progress(min(done_total / max(planned_total, 1), 1.0), text=f"Adherence: {done_total:.1f} / {planned_total} pe")
 
-    # ── LEFT: Live Timer (Work focus or Activity). Activity check-in will appear in Log section after completion.
+    # LEFT: Live Timer (Work focus or Activity)
     with left:
         st.subheader("⏳ Live Timer")
 
         if "timer" not in st.session_state:
             st.session_state.timer = {
                 "running": False, "end_ts": None, "started_at": None, "completed": False,
-                "t": None, "dur_min": 25, "kind": "focus", "activity_type": None, "intensity": None,
+                "t": "W", "dur_min": 25, "kind": "focus",
+                "activity_type": None, "intensity": None,
                 "deep_work": True, "goal_id": None, "task": None, "cat": None,
                 "alloc_bucket": None, "auto_break": True, "break_min": 5
             }
@@ -466,25 +539,27 @@ with tab_timer:
         timer = st.session_state.timer
 
         with st.form("live_timer_form", clear_on_submit=False):
+            # Prefer segmented control, fall back to radio on older Streamlit
             try:
-                live_type = st.segmented_control("Type", ["Work (focus)"], default="Work (focus)")
+                live_type = st.segmented_control("Type", ["Work (focus)", "Activity"], default="Work (focus)")
             except Exception:
                 live_type = st.radio("Type", ["Work (focus)", "Activity"], index=0, horizontal=True)
 
-            # Defaults
-            kind = "focus"; activity_type=None; intensity=None; deep_live=True
-            goal_id=None; alloc_bucket=None; task_text=None; cat=None
-
-            if live_type == "Work (focus)":
+            kind = "focus" if live_type == "Work (focus)" else "activity"
+            goal_id = None
+            alloc_bucket = None
+            task_text = None
+            cat = None
+            activity_type = None
+            # Live duration + inputs
+            if kind == "focus":
                 dur_live = st.number_input("Work duration (minutes)", min_value=5, max_value=120, value=25, step=1, key="live_focus_dur")
                 deep_live = True if dur_live >= 23 else False
-
-                # Show goals from saved plan or derived allocation
+                # show goals from plan (or derived)
                 labels = []
                 choices = []
                 plan_src = default_plan or {}
                 items_for_pick = plan_src.get("items", [])
-
                 if items_for_pick:
                     st.caption("Current week's goals:")
                     for it in sorted(items_for_pick, key=lambda x: x.get("priority_rank", 99)):
@@ -493,23 +568,23 @@ with tab_timer:
                         planned = int(it.get("planned_current",0))
                         cur_pe = sum_pe_for(USER_ID, default_week_key, gid, "current")
                         rem_cur = max(planned - cur_pe, 0)
-                        label = f"[P{it.get('priority_rank')}] {title} · {gcat} • current {rem_cur}/{planned} • backlog {it.get('backlog_in',0)}"
-                        labels.append(label); choices.append((gid, planned))
-                else:
-                    st.info("No active goals found. Create a goal in Weekly Planner.")
-                if labels:
+                        labels.append(f"[P{it.get('priority_rank')}] {title} · {gcat} • current {rem_cur}/{planned} • backlog {it.get('backlog_in',0)}")
+                        choices.append((gid, planned))
                     sel_label = st.radio("Pick goal", labels, index=0, key="live_pick_goal")
                     idx = labels.index(sel_label)
                     goal_id, planned_current = choices[idx]
                     alloc_bucket = determine_alloc_bucket(USER_ID, default_week_key, goal_id, planned_current) if planned_current > 0 else None
                     cat = goals_map.get(goal_id, {}).get("category")
+                else:
+                    st.info("No active goals found. Create a goal in Weekly Planner.")
                 task_text = st.text_input("Optional task note", key="live_task_note")
-
             else:
-                kind = "activity"; deep_live=None
+                # Activity: custom duration + type; no intensity here (kept in manual log section)
                 dur_live = st.number_input("Activity duration (minutes)", min_value=1, max_value=180, value=10, step=1, key="live_act_dur")
                 activity_type = st.selectbox("Activity type", ["exercise","meditation","breathing","other"], index=1, key="live_act_type")
-                intensity = st.selectbox("Intensity", ["light","moderate","vigorous"], index=0, key="live_act_intensity")
+                deep_live = None
+                cat = "Wellbeing"  # default category for activity
+                task_text = st.text_input("Optional activity note", key="live_act_note")
 
             auto_break = st.checkbox("Auto-break after Work", value=True)
             break_min = st.number_input("Break length (min)", 1, 30, value=5)
@@ -519,15 +594,19 @@ with tab_timer:
         if start_live and not timer["running"]:
             timer.update({
                 "running": True, "completed": False, "dur_min": int(dur_live),
-                "t": "W",  # stored as work-type record with kind distinguishing activity/focus
-                "kind": kind, "activity_type": activity_type, "intensity": intensity,
+                "t": "W",
+                "kind": kind,
+                "activity_type": (activity_type if kind == "activity" else None),
+                "intensity": None,  # no intensity in live timer
                 "deep_work": (dur_live >= 23) if kind != "activity" else None,
-                "goal_id": goal_id, "task": task_text, "cat": cat, "alloc_bucket": alloc_bucket,
+                "goal_id": (goal_id if kind == "focus" else None),
+                "task": task_text, "cat": cat,
+                "alloc_bucket": (alloc_bucket if kind == "focus" else None),
                 "auto_break": bool(auto_break), "break_min": int(break_min),
                 "started_at": now_ist(), "end_ts": now_ist() + timedelta(minutes=int(dur_live))
             })
 
-        # Countdown
+        # Countdown / running
         if timer["running"]:
             total_secs = max(int(timer["dur_min"]) * 60, 1)
             remaining_secs = max(int((timer["end_ts"] - now_ist()).total_seconds()), 0)
@@ -540,7 +619,6 @@ with tab_timer:
             ends_lbl    = timer["end_ts"].strftime("%H:%M")
             tlabel = "Work (focus)" if (timer["kind"] == "focus") else "Activity"
 
-            # Big, obvious timer header
             st.markdown(
                 f"""
                 <div style="font-size:1.2rem;margin-bottom:0.25rem;">
@@ -553,54 +631,53 @@ with tab_timer:
                 unsafe_allow_html=True
             )
 
-            # Progress bar that moves as time passes
             st.progress(pct_done, text=f"Elapsed {elapsed_secs//60:02d}:{elapsed_secs%60:02d} • Remaining {rem_m:02d}:{rem_s:02d}")
 
-            # Meta info row
             meta1, meta2, meta3 = st.columns([1, 1, 1])
-            with meta1:
-                st.caption(f"Started: **{started_lbl}**")
-            with meta2:
-                st.caption(f"Ends: **{ends_lbl}**")
-            with meta3:
-                st.caption(f"Last tick: **{now_ist().strftime('%H:%M:%S')}**")
+            with meta1: st.caption(f"Started: **{started_lbl}**")
+            with meta2: st.caption(f"Ends: **{ends_lbl}**")
+            with meta3: st.caption(f"Last tick: **{now_ist().strftime('%H:%M:%S')}**")
 
-            # Controls (processed on next tick — i.e., within 1s)
             colL, colM, colR = st.columns(3)
             stop_now = colL.button("⏹️ Stop / Cancel", use_container_width=True, key="btn_stop_live")
             refresh  = colM.button("🔄 Update now", use_container_width=True, key="btn_refresh_live")
             complete_early = colR.button("✅ Complete now", use_container_width=True, key="btn_complete_live")
 
-            # Button intents
             if stop_now:
                 timer["running"] = False
                 st.warning("Timer canceled.")
                 st.rerun()
 
             if complete_early:
-                # force to now
                 timer["end_ts"] = now_ist()
-                remaining_secs = 0  # handled below
+                remaining_secs = 0
 
             if remaining_secs <= 0 and not timer["completed"]:
                 ended_at = timer["end_ts"]
                 started_at = timer["started_at"]
                 dur_min_done = max(1, int(round((ended_at - started_at).total_seconds() / 60.0)))
 
+                # SAFE call: activity never passes goal fields; focus weekly/custom handled
                 sid = insert_session(
-                    USER_ID, "W", int(dur_min_done), ended_at,
-                    kind=timer["kind"], activity_type=timer["activity_type"], intensity=timer["intensity"],
-                    deep_work=timer["deep_work"],
-                    goal_mode=("weekly" if timer["goal_id"] and (default_plan and default_plan.get("items")) else "custom"),
-                    goal_id=timer["goal_id"], task=timer["task"], cat=timer["cat"],
-                    alloc_bucket=timer["alloc_bucket"],
-                    break_autostart=(timer["kind"] != "activity" and timer["auto_break"]), skipped=False,
+                    USER_ID, timer["t"], int(dur_min_done), ended_at,
+                    kind=("focus" if timer["kind"] == "focus" and timer["t"] == "W" else
+                          "activity" if timer["kind"] == "activity" and timer["t"] == "W" else None),
+                    activity_type=(timer["activity_type"] if timer["kind"] == "activity" else None),
+                    intensity=None,
+                    deep_work=(timer["deep_work"] if (timer["kind"] == "focus" and timer["t"] == "W") else None),
+                    goal_mode=("weekly" if (timer["kind"] == "focus" and timer.get("goal_id") and (default_plan and default_plan.get("items"))) else
+                               "custom" if (timer["kind"] == "focus" and timer["t"] == "W") else None),
+                    goal_id=(timer.get("goal_id") if (timer["kind"] == "focus" and timer["t"] == "W") else None),
+                    task=(timer.get("task") if (timer["t"] == "W") else None),
+                    cat=(timer.get("cat") if (timer["kind"] == "focus" and timer["t"] == "W") else
+                         "Wellbeing" if timer["kind"] == "activity" else None),
+                    alloc_bucket=(timer.get("alloc_bucket") if (timer["kind"] == "focus" and timer.get("goal_id")) else None),
+                    break_autostart=(timer["kind"] == "focus" and timer.get("auto_break", False)) if timer["t"] == "W" else None,
+                    skipped=False if timer["t"] == "B" else None,
                     post_checkin=None, device="web-live"
                 )
 
-                # Play finish sound once on the *next* render (avoids double-play on rerun)
                 st.session_state["beep_once"] = True
-
                 st.session_state["pending_sid"] = sid
                 st.session_state["pending_kind"] = timer["kind"]
 
@@ -608,7 +685,6 @@ with tab_timer:
                 timer["running"] = False
                 st.success(f"Session saved. id={sid}")
 
-                # Optional auto-break for focus
                 if timer["kind"] != "activity" and timer["auto_break"] and timer["break_min"] > 0:
                     timer.update({
                         "running": True, "completed": False,
@@ -621,24 +697,18 @@ with tab_timer:
                     st.info("Starting auto-break…")
                 st.rerun()
 
-            # Manual refresh (optional)
             if refresh:
                 st.rerun()
 
-            # Native continuous tick: wait ~1s then rerun to animate the countdown
             time.sleep(1)
             st.rerun()
 
-
     st.divider()
-
-    # ── Manual Log + Post-check-in positioned in the respective sections
     st.subheader("🎛️ Log a Session (manual)")
 
-    # Work (focus)
+    # Work (focus) manual
     with st.container():
         st.markdown("#### Work (focus)")
-        # pending post-checkin for focus
         if st.session_state.get("pending_sid") and st.session_state.get("pending_kind") == "focus":
             with st.expander("🧠 Post-check-in for your last Work session", expanded=True):
                 colQ, colM, colE = st.columns(3)
@@ -658,7 +728,6 @@ with tab_timer:
 
         with st.form("manual_work_form", clear_on_submit=True):
             dur_min = st.number_input("Work duration (minutes)", min_value=5, max_value=120, value=25, step=1, key="manual_focus_dur")
-            # pick from saved/derived weekly plan
             labels=[]; choices=[]
             plan_src = default_plan or {}
             items_for_pick = plan_src.get("items", [])
@@ -716,10 +785,9 @@ with tab_timer:
                 st.success(f"Logged work. id={sid}")
                 st.rerun()
 
-    # Activity
+    # Activity manual (with intensity)
     with st.container():
         st.markdown("#### Activity")
-        # pending post-checkin for activity
         if st.session_state.get("pending_sid") and st.session_state.get("pending_kind") == "activity":
             with st.expander("🧠 Post-check-in for your last Activity session", expanded=True):
                 colQ, colM, colE = st.columns(3)
@@ -797,7 +865,6 @@ with tab_timer:
 with tab_planner:
     st.header("🗂️ Weekly Planner")
 
-    # Build / Edit plan
     st.subheader("📅 Build / Edit Weekly Plan")
 
     default_monday = (now_ist() - timedelta(days=now_ist().isoweekday() - 1)).date()
@@ -822,12 +889,10 @@ with tab_planner:
     active_goals = [g for g in goals_map_full.values() if g.get("status") == "In Progress"]
     existing_items = {it["goal_id"]: it for it in (existing.get("items", []) if existing else [])}
 
-    # If no existing, pre-fill with derived allocation across all Active goals
     if not existing_items:
         _, derived_items = derive_auto_plan_from_active(USER_ID, wk)
         base_items = derived_items
     else:
-        # carry forward existing
         base_items = []
         for g in active_goals:
             gid = g["_id"]
@@ -842,7 +907,6 @@ with tab_planner:
                     "status_at_plan": "In Progress", "close_action": None, "notes": None
                 })
 
-    # Build DF for editor (no include column; all active goals are part of the week)
     rows = []
     for it in base_items:
         gid = it["goal_id"]; g = goals_map_full.get(gid, {})
@@ -936,7 +1000,7 @@ with tab_planner:
 
     st.divider()
 
-    # Current week table with progress + rollover section below it
+    # Current week + rollover
     st.subheader("📊 Current Week Allocation")
     plan_cur = get_week_plan(USER_ID, wk)
     if not plan_cur:
@@ -966,7 +1030,6 @@ with tab_planner:
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-        # Rollover from previous week
         st.subheader("↩️ Rollover Backlog from Previous Week")
         prev_wk = prev_week_key(wk)
         if st.button(f"Compute & Apply Rollover from {prev_wk}", use_container_width=True):
@@ -1011,23 +1074,16 @@ with tab_planner:
                         st.info("Rollover computed — no changes needed.")
 
     st.divider()
-
-    # Goals (Active in expander, with delete)
     st.subheader("🎯 Goals")
 
     with st.expander("➕ Add a new goal", expanded=False):
         c1, c2, c3 = st.columns([2,1,1])
-        with c1:
-            new_title = st.text_input("Title", key="g_title")
-        with c2:
-            new_category = st.selectbox("Category", ["Learning","Projects","Certification","Career","Health","Wellbeing","Other"], index=0, key="g_cat")
-        with c3:
-            new_status = st.selectbox("Status", ["In Progress","On Hold","Completed"], index=0, key="g_status")
+        with c1: new_title = st.text_input("Title", key="g_title")
+        with c2: new_category = st.selectbox("Category", ["Learning","Projects","Certification","Career","Health","Wellbeing","Other"], index=0, key="g_cat")
+        with c3: new_status = st.selectbox("Status", ["In Progress","On Hold","Completed"], index=0, key="g_status")
         c4, c5 = st.columns([1,2])
-        with c4:
-            new_priority = st.selectbox("Priority (1=highest)", options=[1,2,3,4,5], index=2, key="g_priority")
-        with c5:
-            new_tags = st.text_input("Tags (comma-separated)", key="g_tags")
+        with c4: new_priority = st.selectbox("Priority (1=highest)", options=[1,2,3,4,5], index=2, key="g_priority")
+        with c5: new_tags = st.text_input("Tags (comma-separated)", key="g_tags")
         if st.button("Create Goal", type="primary", use_container_width=True):
             if not new_title.strip():
                 st.error("Title is required.")
@@ -1252,7 +1308,5 @@ with tab_analytics:
                 ax.axis('equal')
                 st.pyplot(fig)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Footer
 # ──────────────────────────────────────────────────────────────────────────────
 st.caption("Focus Timer • Mongo-backed • IST-aware • Planner + Timer + Analytics")
