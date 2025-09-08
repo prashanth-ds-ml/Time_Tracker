@@ -890,7 +890,7 @@ with tab_planner:
             if ex:
                 base_items.append(ex)
             else:
-                rank = int(g.get("priority", 3))
+                rank = int(g.get("priority", 5))
                 base_items.append({
                     "goal_id": gid, "priority_rank": rank, "weight": int(rwm.get(str(rank), 1)),
                     "planned_current": 0, "backlog_in": 0, "total_target": 0,
@@ -904,7 +904,7 @@ with tab_planner:
             "goal_id": gid,
             "title": g.get("title",""),
             "category": g.get("category",""),
-            "rank": str(int(it.get("priority_rank", int(g.get("priority",3))))),
+            "rank": str(int(it.get("priority_rank", int(g.get("priority",5))))),
             "planned_current": int(it.get("planned_current", 0)),
             "backlog_in": int(it.get("backlog_in", 0)),
             "total_target": int(it.get("total_target", int(it.get("planned_current",0))+int(it.get("backlog_in",0)))),
