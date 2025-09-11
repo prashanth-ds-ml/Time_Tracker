@@ -182,11 +182,16 @@ def aggregate_pe_by_goal_bucket(uid: str, week_key: str) -> Dict[str, Dict[str, 
     """
     out: Dict[str, Dict[str, float]] = {}
     pipeline = [
-        {"$match": {"user": uid, "week_key": week_key, "t": "W", "goal_id": {"$exists": True, "$ne": None}}},
+        {"$match": {
+            "user": uid,
+            "week_key": week_key,
+            "t": "W",
+            "goal_id": {"$exists": True, "$ne": None}
+        }},
         {"$group": {
             "_id": {"goal_id": "$goal_id", "alloc_bucket": "$alloc_bucket"},
-            "pe": {"$sum": {"$ifNull": ["$pom_equiv", {"$divide": ["$dur_min", 25.0]}]}}}
-        }
+            "pe": {"$sum": {"$ifNull": ["$pom_equiv", {"$divide": ["$dur_min", 25.0]}]}}
+        }}
     ]
     for row in db.sessions.aggregate(pipeline):
         gid = row["_id"]["goal_id"]
@@ -922,7 +927,6 @@ with tab_timer:
             deleted = delete_last_today_session(USER_ID, today)
             st.warning(f"Deleted last session: {deleted}" if deleted else "Nothing to undo.")
             st.rerun()
-
 # =============================================================================
 # TAB 2: Weekly Planner
 # =============================================================================
@@ -931,21 +935,28 @@ with tab_planner:
 
     st.subheader("📅 Build / Edit Weekly Plan")
 
+    # Week range pickers (ISO week key derived from chosen start)
     default_monday = (now_ist() - timedelta(days=now_ist().isoweekday() - 1)).date()
-    wk_start_date = st.date_input("Week start (choose your preferred start day)", value=default_monday, key="wk_start_date")
+    wk_start_date = st.date_input(
+        "Week start (choose your preferred start day)",
+        value=default_monday,
+        key="wk_start_date"
+    )
     wk_end_date = wk_start_date + timedelta(days=6)
     wk = week_key_from_date(wk_start_date)
     st.caption(f"Week range: **{wk_start_date.isoformat()} → {wk_end_date.isoformat()}** • ISO key: **{wk}**")
 
+    # Capacity & weights (from user prefs)
     wkday_default, wkend_default = get_user_capacity_defaults(USER_ID)
     colWCap1, colWCap2 = st.columns(2)
     with colWCap1:
         wkday = st.number_input("Weekday poms (per day)", 0, 20, value=wkday_default)
     with colWCap2:
         wkend = st.number_input("Weekend poms (per day)", 0, 30, value=wkend_default)
-    total_capacity = wkday*5 + wkend*2
+    total_capacity = int(wkday)*5 + int(wkend)*2
     st.caption(f"Total capacity: **{total_capacity}** poms.")
 
+    # Pull plan + goals to build a base view
     existing = get_week_plan(USER_ID, wk)
     rwm = get_rank_weight_map(USER_ID)
 
@@ -964,14 +975,15 @@ with tab_planner:
             if ex:
                 base_items.append(ex)
             else:
-                # default priority is 3 for consistency
                 rank = int(g.get("priority", 3))
                 base_items.append({
-                    "goal_id": gid, "priority_rank": rank, "weight": int(rwm.get(str(rank), 1)),
+                    "goal_id": gid, "priority_rank": rank,
+                    "weight": int(rwm.get(str(rank), 1)),
                     "planned_current": 0, "backlog_in": 0, "total_target": 0,
                     "status_at_plan": "In Progress", "close_action": None, "notes": None
                 })
 
+    # ── Build the editable planner sheet (stateful) ───────────────────────────
     rows = []
     for it in base_items:
         gid = it["goal_id"]; g = goals_map_full.get(gid, {})
@@ -979,74 +991,96 @@ with tab_planner:
             "goal_id": gid,
             "title": g.get("title",""),
             "category": g.get("category",""),
-            "rank": str(int(it.get("priority_rank", int(g.get("priority",3))))),   # default 3, not 5
+            "rank": str(int(it.get("priority_rank", int(g.get("priority",3))))),  # default 3
             "planned_current": int(it.get("planned_current", 0)),
             "backlog_in": int(it.get("backlog_in", 0)),
             "total_target": int(it.get("total_target", int(it.get("planned_current",0))+int(it.get("backlog_in",0)))),
             "notes": it.get("notes") or ""
         })
 
-    if rows:
-        df = pd.DataFrame(rows)
-        edited = st.data_editor(
-            df,
-            column_config={
-                "title": st.column_config.TextColumn("Goal"),
-                "category": st.column_config.TextColumn("Category"),
-                "rank": st.column_config.SelectboxColumn("Priority (1=high)", options=["1","2","3","4","5"], width="small"),
-                "planned_current": st.column_config.NumberColumn("Planned (current)", step=1, min_value=0),
-                "backlog_in": st.column_config.NumberColumn("Backlog In", step=1, min_value=0),
-                "total_target": st.column_config.NumberColumn("Total Target", step=1, min_value=0, disabled=True),
-                "notes": st.column_config.TextColumn("Notes"),
-            },
-            use_container_width=True, hide_index=True, num_rows="fixed"
-        )
-    else:
-        st.info("No active goals found. Add goals below to plan your week.")
-        edited = pd.DataFrame([])
+    buf_key = f"planner_df_{wk}"
+    sig_key = f"{buf_key}_sig"
+    df_fresh = pd.DataFrame(rows)
 
-    colA1, colA2, colA3 = st.columns([1,1,1])
-    auto_go = colA1.button("⚖️ Auto-allocate (all Active goals by priority)")
-    clear_plan = colA2.button("🧹 Clear planned_current")
-    save_plan = colA3.button("💾 Save plan")
+    # If the set of goals changed (added/removed), reset the buffer to the fresh DF
+    goal_sig = tuple(sorted(df_fresh["goal_id"].tolist()))
+    if st.session_state.get(sig_key) != goal_sig:
+        st.session_state.pop(buf_key, None)
+        st.session_state[sig_key] = goal_sig
 
+    # Use buffer if present, else the fresh DF
+    df_initial = st.session_state.get(buf_key, df_fresh)
+
+    edited = st.data_editor(
+        df_initial,
+        column_config={
+            "title": st.column_config.TextColumn("Goal"),
+            "category": st.column_config.TextColumn("Category"),
+            "rank": st.column_config.SelectboxColumn("Priority (1=high)", options=["1","2","3","4","5"], width="small"),
+            "planned_current": st.column_config.NumberColumn("Planned (current)", step=1, min_value=0),
+            "backlog_in": st.column_config.NumberColumn("Backlog In", step=1, min_value=0),
+            "total_target": st.column_config.NumberColumn("Total Target", step=1, min_value=0, disabled=True),
+            "notes": st.column_config.TextColumn("Notes"),
+        },
+        use_container_width=True, hide_index=True, num_rows="fixed"
+    )
+
+    # Persist the live edits
+    st.session_state[buf_key] = edited.copy()
+
+    # Controls
+    colA1, colA2, colA3, colA4 = st.columns([1,1,1,1])
+    auto_go   = colA1.button("⚖️ Auto-allocate")
+    clear_plan= colA2.button("🧹 Clear planned_current")
+    reset_buf = colA3.button("↩️ Reset from goals")
+    save_plan = colA4.button("💾 Save plan")
+
+    # Actions
     if auto_go and not edited.empty:
-        m = edited.copy()
-        if m.empty or total_capacity <= 0:
-            st.warning("Need at least one active goal and capacity > 0.")
-        else:
-            m["weight"] = m["rank"].map(lambda r: int(rwm.get(str(r), 1)))
-            weights_sum = max(m["weight"].sum(), 1)
-            shares = (m["weight"] / weights_sum) * total_capacity
-            base = np.floor(shares).astype(int)
-            left = total_capacity - base.sum()
-            frac = shares - base
-            order = np.argsort(-frac.values)
-            for i in range(int(left)):
-                base.iloc[order[i]] += 1
-            edited["planned_current"] = base.values
-            edited["backlog_in"] = edited["backlog_in"].fillna(0).astype(int)
-            edited["total_target"] = (edited["planned_current"].astype(int) + edited["backlog_in"].astype(int)).astype(int)
-            st.success("Auto-allocation applied.")
+        m = st.session_state[buf_key].copy()
+        m["rank"] = m["rank"].astype(str)
+        m["weight"] = m["rank"].map(lambda r: int(rwm.get(str(r), 1)))
+        weights_sum = max(int(m["weight"].sum()), 1)
+        shares = (m["weight"] / float(weights_sum)) * float(total_capacity)
+        base = np.floor(shares).astype(int)
+        left = int(total_capacity - int(base.sum()))
+        frac = (shares - base).values
+        order = np.argsort(-frac)
+        for i in range(max(0, left)):
+            base.iloc[order[i]] += 1
+        m["planned_current"] = base.astype(int).values
+        m["backlog_in"] = m["backlog_in"].fillna(0).astype(int)
+        m["total_target"] = (m["planned_current"] + m["backlog_in"]).astype(int)
+        st.session_state[buf_key] = m
+        st.success("Auto-allocation applied.")
+        st.rerun()
+
     if clear_plan and not edited.empty:
-        edited["planned_current"] = 0
-        edited["total_target"] = edited["backlog_in"].astype(int)
+        m = st.session_state[buf_key].copy()
+        m["planned_current"] = 0
+        m["total_target"] = m["backlog_in"].fillna(0).astype(int)
+        st.session_state[buf_key] = m
         st.info("Cleared plan allocations.")
+        st.rerun()
 
-    if not edited.empty:
-        planned_sum = int(edited["planned_current"].sum())
-        st.caption(f"Planned current sum: **{planned_sum}** / capacity **{total_capacity}**")
-        if planned_sum != total_capacity:
-            st.warning("Sum of planned_current should equal capacity total.")
-        else:
-            st.success("Planned_current matches capacity total ✅")
+    if reset_buf:
+        st.session_state.pop(buf_key, None)
+        st.info("Reset to current goals.")
+        st.rerun()
 
-    if save_plan and not edited.empty:
+    # Planned sum check uses the buffer (so it matches what you see)
+    view_df = st.session_state[buf_key]
+    planned_sum = int(view_df["planned_current"].sum()) if not view_df.empty else 0
+    st.caption(f"Planned current sum: **{planned_sum}** / capacity **{total_capacity}**")
+    if planned_sum != total_capacity:
+        st.warning("Sum of planned_current should equal capacity total.")
+    else:
+        st.success("Planned_current matches capacity total ✅")
+
+    if save_plan and not view_df.empty:
         items = []
-        for _, r in edited.iterrows():
-            pc = int(r["planned_current"])
-            bi = int(r["backlog_in"])
-            rank = int(r["rank"])
+        for _, r in view_df.iterrows():
+            pc = int(r["planned_current"]); bi = int(r["backlog_in"]); rank = int(r["rank"])
             items.append({
                 "goal_id": r["goal_id"],
                 "priority_rank": rank,
@@ -1091,8 +1125,8 @@ with tab_planner:
                 "Planned": planned,
                 "Backlog In": int(it["backlog_in"]),
                 "Total Target": int(it["total_target"]),
-                "Done Current (pe)": round(cur_pe,1),
-                "Done Backlog (pe)": round(back_pe,1),
+                "Done Current (pe)": round(cur_pe, 1),
+                "Done Backlog (pe)": round(back_pe, 1),
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
@@ -1154,15 +1188,17 @@ with tab_planner:
             if not new_title.strip():
                 st.error("Title is required.")
             else:
-                gid = create_goal(USER_ID, new_title, new_category, new_status, int(new_priority),
-                                  [t.strip() for t in (new_tags or "").split(",") if t.strip()])
+                gid = create_goal(
+                    USER_ID, new_title, new_category, new_status, int(new_priority),
+                    [t.strip() for t in (new_tags or "").split(",") if t.strip()]
+                )
                 st.success(f"Goal created: {gid}")
                 st.rerun()
 
     all_goals = get_goals(USER_ID)
-    active_goals   = [g for g in all_goals if (g.get("status") == "In Progress")]
-    onhold_goals   = [g for g in all_goals if (g.get("status") == "On Hold")]
-    completed_goals= [g for g in all_goals if (g.get("status") == "Completed")]
+    active_goals    = [g for g in all_goals if (g.get("status") == "In Progress")]
+    onhold_goals    = [g for g in all_goals if (g.get("status") == "On Hold")]
+    completed_goals = [g for g in all_goals if (g.get("status") == "Completed")]
 
     colG1, colG2, colG3 = st.columns(3)
     with colG1: st.metric("Active", len(active_goals))
@@ -1170,15 +1206,14 @@ with tab_planner:
     with colG3: st.metric("Completed", len(completed_goals))
 
     with st.expander("🟢 Active Goals (with weekly progress)", expanded=False):
-        current_wk = wk
-        current_plan = get_week_plan(USER_ID, current_wk)
+        current_plan = get_week_plan(USER_ID, wk)
         if not current_plan:
-            _, items_auto = derive_auto_plan_from_active(USER_ID, current_wk)
+            _, items_auto = derive_auto_plan_from_active(USER_ID, wk)
             planned_by_goal = {it["goal_id"]: int(it["planned_current"]) for it in items_auto}
         else:
             planned_by_goal = {it["goal_id"]: int(it["planned_current"]) for it in current_plan.get("items", [])}
 
-        pe_map = aggregate_pe_by_goal_bucket(USER_ID, current_wk)
+        pe_map = aggregate_pe_by_goal_bucket(USER_ID, wk)
 
         for g in active_goals:
             gid = g["_id"]
