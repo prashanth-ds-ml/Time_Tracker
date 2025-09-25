@@ -223,6 +223,11 @@ def get_rank_weight_map(uid: str) -> Dict[str, int]:
     rwm = ((u.get("prefs") or {}).get("rank_weight_map") or {"1":5,"2":3,"3":2,"4":1,"5":1})
     return {str(k): int(v) for k, v in rwm.items()}
 
+def allow_manual_log(uid: str) -> bool:
+    """Feature flag to show/hide manual Quick Log. Defaults to False."""
+    u = get_user(uid) or {}
+    return bool((u.get("prefs") or {}).get("allow_manual_log", False))
+
 def create_goal(user_id: str, title: str, category: str, status: str = "In Progress",
                 priority: int = 3, tags: Optional[List[str]] = None) -> str:
     gid = uuid.uuid4().hex[:12]
@@ -473,6 +478,57 @@ def derive_auto_plan_from_active(uid: str, week_key: str) -> Tuple[Dict[str, int
     return ({"weekday": wkday, "weekend": wkend, "total": total_capacity}, items)
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Planner helpers (rebalance & move-in)
+# ──────────────────────────────────────────────────────────────────────────────
+def _planner_rebalance(df: pd.DataFrame, total_capacity: int, rwm: Dict[str, int]) -> pd.DataFrame:
+    """Recompute planned_current by weights so the sum equals total_capacity."""
+    if df is None or df.empty:
+        return df
+    m = df.copy()
+    if "rank" not in m:
+        m["rank"] = "3"
+    m["rank"] = m["rank"].astype(str)
+    m["weight"] = m["rank"].map(lambda r: int(rwm.get(str(r), 1)))
+    wsum = int(m["weight"].sum()) or 1
+    shares = (m["weight"] / float(wsum)) * float(total_capacity)
+    base = np.floor(shares).astype(int)
+    left = int(total_capacity - int(base.sum()))
+    frac = (shares - base).values
+    order = np.argsort(-frac)
+    for i in range(max(0, left)):
+        base.iloc[order[i]] += 1
+    m["planned_current"] = base.astype(int).values
+    m["backlog_in"] = m.get("backlog_in", 0).fillna(0).astype(int)
+    m["total_target"] = (m["planned_current"] + m["backlog_in"]).astype(int)
+    return m.drop(columns=["weight"], errors="ignore")
+
+def _planner_add_goal_row(buf_key: str, g: Dict[str, Any], rwm: Dict[str,int], total_capacity: int):
+    """Append a goal to the planner buffer (if missing) and auto-rebalance."""
+    if buf_key not in st.session_state:
+        st.session_state[buf_key] = pd.DataFrame(columns=["goal_id","title","category","rank","planned_current","backlog_in","total_target","notes"])
+    df = st.session_state[buf_key].copy()
+
+    gid = g["_id"]
+    if "goal_id" in df.columns and (df["goal_id"] == gid).any():
+        return  # already present
+
+    row = {
+        "goal_id": gid,
+        "title": g.get("title",""),
+        "category": g.get("category",""),
+        "rank": str(int(g.get("priority", 3))),
+        "planned_current": 0,
+        "backlog_in": 0,
+        "total_target": 0,
+        "notes": ""
+    }
+    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+
+    # Auto-rebalance to keep capacity respected
+    df = _planner_rebalance(df, total_capacity, rwm)
+    st.session_state[buf_key] = df
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Sidebar
 # ──────────────────────────────────────────────────────────────────────────────
 st.sidebar.header("⚙️ Connection")
@@ -591,8 +647,9 @@ with tab_timer:
                 st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
                 planned_total = sum(r["Planned"] for r in rows)
                 done_total = sum(r["Done Current (pe)"] + r["Done Backlog (pe)"] for r in rows)
+                surplus = max(0.0, done_total - planned_total)
                 st.progress(min(done_total / max(planned_total, 1), 1.0),
-                            text=f"Adherence: {done_total:.1f} / {planned_total} pe")
+                            text=f"Adherence: {done_total:.1f} / {planned_total} pe • Surplus {surplus:.1f}")
         else:
             st.caption("⏳ Timer running — heavy panel will refresh every ~10s.")
 
@@ -833,78 +890,79 @@ with tab_timer:
                 st.session_state.pop("pending_kind", None)
 
     # ---- Quick Log (manual template) ----
-    with st.expander("🧾 Quick Log (manual entry)", expanded=False):
-        # Defaults: end now (IST), today, 25 min
-        d_date = st.date_input("End date (IST)", value=now_ist().date(), key="ql_date")
-        d_time = st.time_input("End time (IST)", value=now_ist().time().replace(microsecond=0), key="ql_time")
-        dur = st.number_input("Duration (minutes)", min_value=1, max_value=240, value=25, step=1, key="ql_dur")
+    if allow_manual_log(USER_ID):
+        with st.expander("🧾 Quick Log (manual entry)", expanded=False):
+            # Defaults: end now (IST), today, 25 min
+            d_date = st.date_input("End date (IST)", value=now_ist().date(), key="ql_date")
+            d_time = st.time_input("End time (IST)", value=now_ist().time().replace(microsecond=0), key="ql_time")
+            dur = st.number_input("Duration (minutes)", min_value=1, max_value=240, value=25, step=1, key="ql_dur")
 
-        q_kind = st.radio("Type", ["Work (focus)", "Activity"], horizontal=True, key="ql_kind")
-        note = st.text_input("Optional note / task", key="ql_note")
+            q_kind = st.radio("Type", ["Work (focus)", "Activity"], horizontal=True, key="ql_kind")
+            note = st.text_input("Optional note / task", key="ql_note")
 
-        # Build the list of current-week goals with remaining 'current' poms
-        labels, choices = [], []
-        plan_src = default_plan or {}
-        items_for_pick = plan_src.get("items", [])
-        pe_map = aggregate_pe_by_goal_bucket(USER_ID, default_week_key)
+            # Build the list of current-week goals with remaining 'current' poms
+            labels, choices = [], []
+            plan_src = default_plan or {}
+            items_for_pick = plan_src.get("items", [])
+            pe_map = aggregate_pe_by_goal_bucket(USER_ID, default_week_key)
 
-        goal_id, planned_current = None, 0
-        act_type = None
+            goal_id, planned_current = None, 0
+            act_type = None
 
-        if q_kind == "Work (focus)":
-            if items_for_pick:
-                st.caption("Current week's goals:")
-                for it in sorted(items_for_pick, key=lambda x: x.get("priority_rank", 99)):
-                    gid = it["goal_id"]; g = goals_map.get(gid, {})
-                    planned = int(it.get("planned_current", 0))
-                    cur_pe = pe_map.get(gid, {}).get("current", 0.0)
-                    rem_cur = max(planned - cur_pe, 0)
-                    labels.append(f"[P{it.get('priority_rank')}] {g.get('title', gid)} · {g.get('category','—')} • current {rem_cur}/{planned} • backlog {it.get('backlog_in',0)}")
-                    choices.append((gid, planned))
-                labels = ["— Unplanned / ad-hoc —"] + labels
-                choices = [("UNPLANNED", 0)] + choices
-                sel = st.selectbox("Attach to goal", labels, index=0, key="ql_goal")
-                idx = labels.index(sel)
-                goal_id, planned_current = choices[idx]
+            if q_kind == "Work (focus)":
+                if items_for_pick:
+                    st.caption("Current week's goals:")
+                    for it in sorted(items_for_pick, key=lambda x: x.get("priority_rank", 99)):
+                        gid = it["goal_id"]; g = goals_map.get(gid, {})
+                        planned = int(it.get("planned_current", 0))
+                        cur_pe = pe_map.get(gid, {}).get("current", 0.0)
+                        rem_cur = max(planned - cur_pe, 0)
+                        labels.append(f"[P{it.get('priority_rank')}] {g.get('title', gid)} · {g.get('category','—')} • current {rem_cur}/{planned} • backlog {it.get('backlog_in',0)}")
+                        choices.append((gid, planned))
+                    labels = ["— Unplanned / ad-hoc —"] + labels
+                    choices = [("UNPLANNED", 0)] + choices
+                    sel = st.selectbox("Attach to goal", labels, index=0, key="ql_goal")
+                    idx = labels.index(sel)
+                    goal_id, planned_current = choices[idx]
+                else:
+                    st.info("No goals in this week's plan — will log as Unplanned.")
+                    goal_id, planned_current = "UNPLANNED", 0
+
             else:
-                st.info("No goals in this week's plan — will log as Unplanned.")
-                goal_id, planned_current = "UNPLANNED", 0
+                # Activity subtype
+                act_type = st.selectbox("Activity type", ["exercise", "meditation", "breathing", "other"], index=1, key="ql_act")
 
-        else:
-            # Activity subtype
-            act_type = st.selectbox("Activity type", ["exercise", "meditation", "breathing", "other"], index=1, key="ql_act")
+            if st.button("💾 Save session", use_container_width=True, key="ql_save"):
+                # Compose ended_at (IST-aware)
+                end_naive = datetime.combine(d_date, d_time)
+                ended_at_ist = IST.localize(end_naive) if end_naive.tzinfo is None else end_naive.astimezone(IST)
 
-        if st.button("💾 Save session", use_container_width=True, key="ql_save"):
-            # Compose ended_at (IST-aware)
-            end_naive = datetime.combine(d_date, d_time)
-            ended_at_ist = IST.localize(end_naive) if end_naive.tzinfo is None else end_naive.astimezone(IST)
+                is_focus = (q_kind == "Work (focus)")
 
-            is_focus = (q_kind == "Work (focus)")
+                use_goal = (is_focus and goal_id and goal_id != "UNPLANNED")
+                alloc_bucket = determine_alloc_bucket(USER_ID, default_week_key, goal_id, planned_current) if use_goal and planned_current > 0 else None
+                cat = (goals_map.get(goal_id, {}).get("category") if use_goal else ("Wellbeing" if not is_focus else None))
 
-            use_goal = (is_focus and goal_id and goal_id != "UNPLANNED")
-            alloc_bucket = determine_alloc_bucket(USER_ID, default_week_key, goal_id, planned_current) if use_goal and planned_current > 0 else None
-            cat = (goals_map.get(goal_id, {}).get("category") if use_goal else ("Wellbeing" if not is_focus else None))
-
-            sid = insert_session(
-                USER_ID,
-                "W",                              # we log work/activity rows here (breaks are handled by live timer)
-                int(dur),
-                ended_at_ist,
-                kind=("focus" if is_focus else "activity"),
-                activity_type=(act_type if not is_focus else None),
-                deep_work=(is_focus and int(dur) >= 23),
-                goal_mode=("weekly" if use_goal else "custom"),
-                goal_id=(goal_id if use_goal else None),
-                task=(note or None),
-                cat=cat,
-                alloc_bucket=(alloc_bucket if use_goal else None),
-                break_autostart=None,
-                skipped=None,
-                post_checkin=None,
-                device="manual"
-            )
-            st.success(f"Saved. id={sid}")
-            st.rerun()
+                sid = insert_session(
+                    USER_ID,
+                    "W",                              # we log work/activity rows here (breaks are handled by live timer)
+                    int(dur),
+                    ended_at_ist,
+                    kind=("focus" if is_focus else "activity"),
+                    activity_type=(act_type if not is_focus else None),
+                    deep_work=(is_focus and int(dur) >= 23),
+                    goal_mode=("weekly" if use_goal else "custom"),
+                    goal_id=(goal_id if use_goal else None),
+                    task=(note or None),
+                    cat=cat,
+                    alloc_bucket=(alloc_bucket if use_goal else None),
+                    break_autostart=None,
+                    skipped=None,
+                    post_checkin=None,
+                    device="manual"
+                )
+                st.success(f"Saved. id={sid}")
+                st.rerun()
 
     st.subheader("📝 Today’s Sessions")
     todays = list_today_sessions(USER_ID, today)
@@ -927,6 +985,7 @@ with tab_timer:
             deleted = delete_last_today_session(USER_ID, today)
             st.warning(f"Deleted last session: {deleted}" if deleted else "Nothing to undo.")
             st.rerun()
+
 # =============================================================================
 # TAB 2: Weekly Planner
 # =============================================================================
@@ -955,6 +1014,13 @@ with tab_planner:
         wkend = st.number_input("Weekend poms (per day)", 0, 30, value=wkend_default)
     total_capacity = int(wkday)*5 + int(wkend)*2
     st.caption(f"Total capacity: **{total_capacity}** poms.")
+
+    # Auto-rebalance toggle
+    auto_rebalance_on_rank_change = st.toggle(
+        "⚖️ Auto-rebalance when priority (rank) changes",
+        value=True,
+        help="When ON, changing a goal's priority will instantly rebalance planned allocations to match capacity."
+    )
 
     # Pull plan + goals to build a base view
     existing = get_week_plan(USER_ID, wk)
@@ -1011,6 +1077,7 @@ with tab_planner:
     # Use buffer if present, else the fresh DF
     df_initial = st.session_state.get(buf_key, df_fresh)
 
+    # Editor
     edited = st.data_editor(
         df_initial,
         column_config={
@@ -1025,8 +1092,23 @@ with tab_planner:
         use_container_width=True, hide_index=True, num_rows="fixed"
     )
 
-    # Persist the live edits
+    # Detect rank change and optionally auto-rebalance
+    prev_df = st.session_state.get(buf_key)
     st.session_state[buf_key] = edited.copy()
+
+    if auto_rebalance_on_rank_change and prev_df is not None and not edited.empty and not prev_df.empty:
+        try:
+            prev_rank_map = dict(zip(prev_df["goal_id"], prev_df["rank"].astype(str)))
+            new_rank_map  = dict(zip(edited["goal_id"], edited["rank"].astype(str)))
+            rank_changed = any(prev_rank_map.get(gid) != new_rank_map.get(gid) for gid in new_rank_map.keys())
+        except Exception:
+            rank_changed = False
+
+        if rank_changed:
+            m = _planner_rebalance(st.session_state[buf_key], total_capacity, rwm)
+            st.session_state[buf_key] = m
+            st.toast("Rebalanced allocations to reflect new priorities.", icon="⚖️")
+            st.rerun()
 
     # Controls
     colA1, colA2, colA3, colA4 = st.columns([1,1,1,1])
@@ -1038,19 +1120,7 @@ with tab_planner:
     # Actions
     if auto_go and not edited.empty:
         m = st.session_state[buf_key].copy()
-        m["rank"] = m["rank"].astype(str)
-        m["weight"] = m["rank"].map(lambda r: int(rwm.get(str(r), 1)))
-        weights_sum = max(int(m["weight"].sum()), 1)
-        shares = (m["weight"] / float(weights_sum)) * float(total_capacity)
-        base = np.floor(shares).astype(int)
-        left = int(total_capacity - int(base.sum()))
-        frac = (shares - base).values
-        order = np.argsort(-frac)
-        for i in range(max(0, left)):
-            base.iloc[order[i]] += 1
-        m["planned_current"] = base.astype(int).values
-        m["backlog_in"] = m["backlog_in"].fillna(0).astype(int)
-        m["total_target"] = (m["planned_current"] + m["backlog_in"]).astype(int)
+        m = _planner_rebalance(m, total_capacity, rwm)
         st.session_state[buf_key] = m
         st.success("Auto-allocation applied.")
         st.rerun()
@@ -1058,7 +1128,8 @@ with tab_planner:
     if clear_plan and not edited.empty:
         m = st.session_state[buf_key].copy()
         m["planned_current"] = 0
-        m["total_target"] = m["backlog_in"].fillna(0).astype(int)
+        m["backlog_in"] = m["backlog_in"].fillna(0).astype(int)
+        m["total_target"] = (m["planned_current"] + m["backlog_in"]).astype(int)
         st.session_state[buf_key] = m
         st.info("Cleared plan allocations.")
         st.rerun()
@@ -1131,6 +1202,7 @@ with tab_planner:
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
         st.subheader("↩️ Rollover Backlog from Previous Week")
+        st.caption("We add (prev total − prev actual) to this week's **Backlog In** per goal, if that goal also exists this week.")
         prev_wk = prev_week_key(wk)
         if st.button(f"Compute & Apply Rollover from {prev_wk}", use_container_width=True):
             prev = get_week_plan(USER_ID, prev_wk)
@@ -1244,6 +1316,14 @@ with tab_planner:
                     del_click = st.button("🗑️ Delete", key=f"del_{gid}", disabled=not can_delete)
                 if st.button("Save", key=f"save_{gid}"):
                     update_goal(gid, {"title": etitle, "status": estatus, "category": ecat, "priority": int(eprio)})
+                    # If goal is in planner buffer, update its rank and optionally rebalance
+                    if auto_rebalance_on_rank_change:
+                        _buf_key = f"planner_df_{wk}"
+                        if _buf_key in st.session_state:
+                            dfp = st.session_state[_buf_key]
+                            if not dfp.empty and (dfp["goal_id"] == gid).any():
+                                dfp.loc[dfp["goal_id"] == gid, "rank"] = str(int(eprio))
+                                st.session_state[_buf_key] = _planner_rebalance(dfp, total_capacity, rwm)
                     st.success("Updated.")
                     st.rerun()
                 if del_click:
@@ -1257,7 +1337,7 @@ with tab_planner:
         for g in onhold_goals:
             with st.container(border=True):
                 st.write(f"**{g.get('title')}** · _{g.get('category','')}_ · priority {g.get('priority',3)}")
-                cols = st.columns([2,1,1,1])
+                cols = st.columns([2,1,1,1,1])
                 with cols[0]:
                     etitle = st.text_input("Edit title", value=g.get("title",""), key=f"hold_t_{g['_id']}")
                 with cols[1]:
@@ -1269,10 +1349,24 @@ with tab_planner:
                 with cols[3]:
                     can_delete = db.sessions.count_documents({"user": USER_ID, "goal_id": g["_id"]}) == 0
                     del_click = st.button("🗑️ Delete", key=f"hold_del_{g['_id']}", disabled=not can_delete)
-                if st.button("Save", key=f"hold_save_{g['_id']}"):
+                with cols[4]:
+                    move_click = st.button("↪️ Move to this week's plan", key=f"hold_move_{g['_id']}")
+
+                if st.button("Save", key=f"hold_save_{g['_id']}"]:
                     update_goal(g["_id"], {"title": etitle, "category": ecat, "priority": int(eprio)})
                     st.success("Updated.")
                     st.rerun()
+
+                if move_click:
+                    # 1) Flip status → In Progress
+                    update_goal(g["_id"], {"status": "In Progress"})
+                    # 2) Add to planner buffer + auto-rebalance
+                    _buf_key = f"planner_df_{wk}"
+                    _total_capacity = int(wkday)*5 + int(wkend)*2
+                    _planner_add_goal_row(_buf_key, g, rwm, _total_capacity)
+                    st.success("Moved to current week and rebalanced.")
+                    st.rerun()
+
                 if del_click:
                     if delete_goal(g["_id"]):
                         st.warning("Goal deleted.")
@@ -1342,6 +1436,8 @@ with tab_analytics:
                 })
 
             dfw = pd.DataFrame(rows)
+            # Surplus column
+            dfw["surplus_pe"] = (dfw["actual_pe"] - dfw["planned"]).clip(lower=0)
             st.dataframe(dfw, use_container_width=True, hide_index=True)
 
             c1, c2 = st.columns(2)
