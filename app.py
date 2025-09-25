@@ -1352,7 +1352,7 @@ with tab_planner:
                 with cols[4]:
                     move_click = st.button("↪️ Move to this week's plan", key=f"hold_move_{g['_id']}")
 
-                if st.button("Save", key=f"hold_save_{g['_id']}"]:
+                if st.button("Save", key=f"hold_save_{g['_id']}"):
                     update_goal(g["_id"], {"title": etitle, "category": ecat, "priority": int(eprio)})
                     st.success("Updated.")
                     st.rerun()
