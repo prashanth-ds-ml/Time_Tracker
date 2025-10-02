@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 IST = pytz.timezone("Asia/Kolkata")
 FINISH_SOUND_URL = "https://github.com/prashanth-ds-ml/Time_Tracker/raw/refs/heads/main/one_piece_overtake.mp3"
 
-CATEGORIES = ["Learning","Projects","Certification","Career","Health","Wellbeing","Other"]
+CATEGORIES = ["Learning","Projects","Certification","Career","Health","Wellbeing","Start-up","Other"]
 ALLOWED_ACTIVITY_TYPES = {"exercise", "meditation", "breathing", "other"}
 ALLOWED_BUCKETS = {"current", "backlog"}
 
