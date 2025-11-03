@@ -211,7 +211,6 @@ def list_today_sessions(uid: str, date_ist: str) -> List[Dict[str, Any]]:
 # ──────────────────────────────────────────────────────────────────────────────
 # Data helpers (writes bust caches)
 # ──────────────────────────────────────────────────────────────────────────────
-
 def get_user_capacity_defaults(uid: str) -> Tuple[int, int]:
     u = get_user(uid) or {}
     prefs = (u.get("prefs") or {})
@@ -219,18 +218,15 @@ def get_user_capacity_defaults(uid: str) -> Tuple[int, int]:
     wkend_default = int(prefs.get("weekend_poms", 6))
     return wkday_default, wkend_default
 
-
 def get_rank_weight_map(uid: str) -> Dict[str, int]:
     u = get_user(uid) or {}
     rwm = ((u.get("prefs") or {}).get("rank_weight_map") or {"1":5,"2":3,"3":2,"4":1,"5":1})
     return {str(k): int(v) for k, v in rwm.items()}
 
-
 def allow_manual_log(uid: str) -> bool:
     """Feature flag to show/hide manual Quick Log. Defaults to False."""
     u = get_user(uid) or {}
     return bool((u.get("prefs") or {}).get("allow_manual_log", False))
-
 
 def create_goal(user_id: str, title: str, category: str, status: str = "In Progress",
                 priority: int = 3, tags: Optional[List[str]] = None) -> str:
@@ -249,12 +245,10 @@ def create_goal(user_id: str, title: str, category: str, status: str = "In Progr
     st.cache_data.clear()
     return gid
 
-
 def update_goal(goal_id: str, updates: Dict[str, Any]):
     updates["updated_at"] = utc_now_naive()
     db.goals.update_one({"_id": goal_id, "user": USER_ID}, {"$set": updates})
     st.cache_data.clear()
-
 
 def delete_goal(goal_id: str) -> bool:
     has_sessions = db.sessions.count_documents({"user": USER_ID, "goal_id": goal_id}) > 0
@@ -264,7 +258,6 @@ def delete_goal(goal_id: str) -> bool:
     db.goals.delete_one({"_id": goal_id, "user": USER_ID})
     st.cache_data.clear()
     return True
-
 
 def upsert_week_plan(uid: str, week_key: str, week_start: str, week_end: str,
                      capacity: Dict[str, int], items: List[Dict[str, Any]]):
@@ -279,7 +272,6 @@ def upsert_week_plan(uid: str, week_key: str, week_start: str, week_end: str,
     )
     st.cache_data.clear()
 
-
 def upsert_daily_target(uid: str, date_ist: str, target_pomos: int, target_minutes: Optional[int] = None):
     _id = f"{uid}|{date_ist}"
     now = utc_now_naive()
@@ -293,10 +285,8 @@ def upsert_daily_target(uid: str, date_ist: str, target_pomos: int, target_minut
     )
     st.cache_data.clear()
 
-
 def get_daily_target(uid: str, date_ist: str) -> Optional[Dict[str, Any]]:
     return db.daily_targets.find_one({"user": uid, "date_ist": date_ist})
-
 
 def determine_alloc_bucket(uid: str, week_key: str, goal_id: str, planned_current: int) -> str:
     pe_map = aggregate_pe_by_goal_bucket(uid, week_key)
@@ -304,7 +294,6 @@ def determine_alloc_bucket(uid: str, week_key: str, goal_id: str, planned_curren
     return "current" if done_current + 1e-6 < float(planned_current) else "backlog"
 
 # ── Hardened insert_session (fixes 'updated_at' conflict)
-
 def insert_session(
     user_id: str,
     t: str,                 # "W" or "B"
@@ -439,7 +428,6 @@ def insert_session(
     st.cache_data.clear()
     return sid
 
-
 def delete_last_today_session(uid: str, date_ist: str) -> Optional[str]:
     last = db.sessions.find({"user": uid, "date_ist": date_ist}).sort("started_at_ist", -1).limit(1)
     last = next(iter(last), None)
@@ -449,14 +437,12 @@ def delete_last_today_session(uid: str, date_ist: str) -> Optional[str]:
         return last["_id"]
     return None
 
-
 def update_session_post_checkin(sid: str, payload: Dict[str, Any]):
     db.sessions.update_one({"_id": sid, "user": USER_ID},
                            {"$set": {"post_checkin": payload, "updated_at": utc_now_naive()}})
     st.cache_data.clear()
 
 # ── Derived plan from active goals
-
 def derive_auto_plan_from_active(uid: str, week_key: str) -> Tuple[Dict[str, int], List[Dict[str, Any]]]:
     wkday, wkend = get_user_capacity_defaults(uid)
     total_capacity = wkday * 5 + wkend * 2
@@ -494,7 +480,6 @@ def derive_auto_plan_from_active(uid: str, week_key: str) -> Tuple[Dict[str, int
 # ──────────────────────────────────────────────────────────────────────────────
 # Planner helpers (rebalance & move-in)
 # ──────────────────────────────────────────────────────────────────────────────
-
 def _planner_rebalance(df: pd.DataFrame, total_capacity: int, rwm: Dict[str, int]) -> pd.DataFrame:
     """Recompute planned_current by weights so the sum equals total_capacity."""
     if df is None or df.empty:
@@ -516,7 +501,6 @@ def _planner_rebalance(df: pd.DataFrame, total_capacity: int, rwm: Dict[str, int
     m["backlog_in"] = m.get("backlog_in", 0).fillna(0).astype(int)
     m["total_target"] = (m["planned_current"] + m["backlog_in"]).astype(int)
     return m.drop(columns=["weight"], errors="ignore")
-
 
 def _planner_add_goal_row(buf_key: str, g: Dict[str, Any], rwm: Dict[str,int], total_capacity: int):
     """Append a goal to the planner buffer (if missing) and auto-rebalance."""
@@ -632,7 +616,7 @@ with tab_timer:
 
     st.divider()
 
-    # ── Live Timer (full width; removed 'Current Week Allocation' panel) ──────
+    # ── Live Timer (full width) ───────────────────────────────────────────────
     st.subheader("⏳ Live Timer")
 
     if "timer" not in st.session_state:
@@ -1418,14 +1402,14 @@ with tab_analytics:
             dfw["surplus_pe"] = (dfw["actual_pe"] - dfw["planned"]).clip(lower=0)
             st.dataframe(dfw, use_container_width=True, hide_index=True)
 
+            # --- Full-width weekly charts ---
             st.subheader("Adherence % (by week)")
-st.line_chart(dfw.set_index("week")["adherence_pct"])
+            st.line_chart(dfw.set_index("week")["adherence_pct"])
 
-st.divider()
+            st.divider()
 
-st.subheader("Deep Work % (by week)")
-st.bar_chart(dfw.set_index("week")["deep_pct"])
-
+            st.subheader("Deep Work % (by week)")
+            st.bar_chart(dfw.set_index("week")["deep_pct"])
 
             st.divider()
 
