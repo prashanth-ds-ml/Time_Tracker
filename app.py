@@ -579,6 +579,75 @@ if st.session_state.get("beep_once"):
     play_finish_sound()
     st.session_state["beep_once"] = False
 
+def render_activity_heatmap(user_id: str, weeks: int = 52):
+    """
+    Draw a GitHub-style heatmap showing total WORK minutes per day
+    (t == 'W', includes focus + activity) for the last `weeks` weeks.
+    """
+    # 1) Fetch minutes per day
+    agg = db.sessions.aggregate([
+        {"$match": {"user": user_id, "t": "W"}},
+        {"$group": {"_id": "$date_ist", "mins": {"$sum": "$dur_min"}}}
+    ])
+    mins_by_date = {pd.to_datetime(doc["_id"]).date(): int(doc["mins"])
+                    for doc in agg if doc.get("_id")}
+
+    if not mins_by_date:
+        st.info("No activity yet to draw heatmap.")
+        return
+
+    # 2) Build date grid (Mon..Sun rows x week columns)
+    end = now_ist().date()
+    start = end - timedelta(days=weeks * 7 - 1)
+    start_monday = start - timedelta(days=start.weekday())   # align to Monday
+    cols = ((end - start_monday).days // 7) + 1
+    grid = np.zeros((7, cols), dtype=int)
+
+    all_dates = pd.date_range(start=start_monday, end=end, freq="D").to_pydatetime()
+    for dt in all_dates:
+        d = dt.date()
+        c = ((d - start_monday).days) // 7
+        r = d.weekday()  # 0=Mon .. 6=Sun
+        grid[r, c] = mins_by_date.get(d, 0)
+
+    # 3) Scale color using 95th percentile to avoid outliers dominating
+    vals = grid.flatten()
+    vmax = 30
+    if (vals > 0).any():
+        vmax = max(vmax, int(np.percentile(vals[vals > 0], 95)))
+
+    # 4) Plot
+    fig_w = max(10, cols * 0.22)  # responsive width
+    fig, ax = plt.subplots(figsize=(fig_w, 2.2))
+    im = ax.imshow(grid, aspect="auto", cmap="Greens", vmin=0, vmax=vmax, origin="upper")
+
+    # Month labels at the first Monday in each month
+    month_positions, month_labels = [], []
+    for c in range(cols):
+        day0 = start_monday + timedelta(days=c * 7)
+        if day0.day <= 7:
+            month_positions.append(c)
+            month_labels.append(day0.strftime("%b"))
+    ax.set_xticks(month_positions)
+    ax.set_xticklabels(month_labels, fontsize=8)
+
+    # Show a few weekday labels
+    ax.set_yticks([0, 2, 4, 6])
+    ax.set_yticklabels(["Mon", "Wed", "Fri", "Sun"], fontsize=8)
+
+    # Clean frame
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+    ax.tick_params(length=0)
+    ax.set_xlabel(f"Last {weeks} weeks", fontsize=9)
+    ax.set_ylabel("")
+
+    cb = fig.colorbar(im, ax=ax, fraction=0.02, pad=0.04)
+    cb.set_label("Minutes", fontsize=8)
+    cb.ax.tick_params(labelsize=8)
+
+    st.pyplot(fig, use_container_width=True)
+
 # =============================================================================
 # TAB 1: Timer & Log
 # =============================================================================
@@ -1413,19 +1482,16 @@ with tab_analytics:
 
             st.divider()
 
+            # NEW: GitHub-style daily heatmap (last 52 weeks)
+            st.subheader("📆 Daily Activity — GitHub-style heatmap")
+            render_activity_heatmap(USER_ID, weeks=52)
+
+            st.divider()
+
+            # Keep a week picker for *other* details below (e.g., Career vs Wellbeing)
             idx_last = max(0, len(weeks_view) - 1)
             sel_week = st.selectbox("Pick a week for details", weeks_view, index=idx_last, key="sel_week_analytics")
-            st.subheader("📆 Daily Activity (minutes only)")
-            days = week_dates_list(sel_week)
-            daily_rows = []
-            for d in days:
-                mins_doc = next(iter(db.sessions.aggregate([
-                    {"$match": {"user": USER_ID, "date_ist": d, "t":"W"}},
-                    {"$group": {"_id": None, "mins": {"$sum": "$dur_min"}}}
-                ])), None)
-                daily_rows.append({"date": d, "minutes": int(mins_doc["mins"]) if mins_doc else 0})
-            dfd = pd.DataFrame(daily_rows).set_index("date")
-            st.bar_chart(dfd["minutes"])
+
 
             st.divider()
             st.subheader("Career vs Wellbeing (selected week)")
