@@ -1418,13 +1418,14 @@ with tab_analytics:
             dfw["surplus_pe"] = (dfw["actual_pe"] - dfw["planned"]).clip(lower=0)
             st.dataframe(dfw, use_container_width=True, hide_index=True)
 
-            c1, c2 = st.columns(2)
-            with c1:
-                st.subheader("Adherence %")
-                st.line_chart(dfw.set_index("week")["adherence_pct"])
-            with c2:
-                st.subheader("Deep Work %")
-                st.bar_chart(dfw.set_index("week")["deep_pct"])
+            st.subheader("Adherence % (by week)")
+st.line_chart(dfw.set_index("week")["adherence_pct"])
+
+st.divider()
+
+st.subheader("Deep Work % (by week)")
+st.bar_chart(dfw.set_index("week")["deep_pct"])
+
 
             st.divider()
 
